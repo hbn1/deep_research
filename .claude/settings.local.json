@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(npm install *)",
+      "Bash(.conda/python.exe -m pip install -r requirements.txt)",
+      "Bash(.conda/python.exe app/app_main.py)",
+      "Bash(npx vite *)",
+      "Bash(npm run *)",
+      "Bash(.conda/python.exe app/mult_agents/rag/ingest.py)",
+      "Bash(curl -s -o NUL -w \"%{http_code}\" http://localhost:5173)"
+    ]
+  }
+}
