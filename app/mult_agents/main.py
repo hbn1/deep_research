@@ -1,10 +1,4 @@
 """运行主入口：构建 Agent、初始化记忆与 checkpointer，并驱动工作流执行。"""
-
-"""
- * 小滴课堂,愿景：让技术不再难学
- * @Remark 有问题联系我【xdclass68】
- * 源码-笔记-技术交流群,官网 https://xdclass.net
-"""
 import argparse
 import json
 import importlib
@@ -26,9 +20,13 @@ if __package__ is None or __package__ == "":
 
 from .config import AppConfig
 from .graph import build_app as build_workflow_app
+from .nodes import (
+    intent_node, direct_answer_node, plan_node,
+    web_search_node, local_rag_node, deep_dive_node,
+    analyze_node, reflect_node, write_node,
+)
+from .utils import colorize, emit, collect_tool_calls, with_memory_context, log_inputs
 from .memory import MemoryManager
-from .prompts import PROMPTS
-from .state import ResearchState, create_initial_state
 from .tools import (
     extract_requirements,
     outline_from_topics,
@@ -43,182 +41,10 @@ from .tools import (
 )
 from .rag.core import RAGConfig
 
-
 logger = logging.getLogger("mult_agents")
 
 MEMORY_MANAGER: Optional[MemoryManager] = None
 CHECKPOINTER_CONTEXT = None
-
-ANSI = {
-    "reset": "\033[0m",
-    "cyan": "\033[36m",
-    "magenta": "\033[35m",
-    "yellow": "\033[33m",
-    "green": "\033[32m",
-    "red": "\033[31m",
-}
-
-
-def colorize(text: str, color: str) -> str:
-    if os.getenv("NO_COLOR"):
-        return text
-    code = ANSI.get(color, "")
-    if not code:
-        return text
-    return f"{code}{text}{ANSI['reset']}"
-
-
-def emit(node: str, content: str):
-    preview = content.replace("\n", " ")
-    if len(preview) > 400:
-        preview = preview[:400] + "..."
-    logger.info("%s 输出: %s", colorize(f"[{node}]", "yellow"), preview)
-
-
-def collect_tool_calls(messages) -> tuple[list, list]:
-    tools = []
-    tool_outputs = []
-    for msg in messages:
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            for call in tool_calls:
-                name = call.get("name") if isinstance(call, dict) else None
-                if name:
-                    tools.append(name)
-        name = getattr(msg, "name", None)
-        msg_type = getattr(msg, "type", None)
-        if msg_type == "tool" and name:
-            tools.append(name)
-            output = getattr(msg, "content", "")
-            if output:
-                tool_outputs.append(f"{name}: {output}")
-    return tools, tool_outputs
-
-
-def with_memory_context(state: ResearchState, user_prompt: str) -> str:
-    memory_context = state.get("memory_context", "").strip()
-    if not memory_context:
-        return user_prompt
-    return f"{user_prompt}\n\n[跨会话记忆]\n{memory_context}"
-
-
-def log_inputs(node: str, agent_name: str, payload: dict):
-    preview = {
-        key: (value[:200] + "..." if isinstance(value, str) and len(value) > 200 else value)
-        for key, value in payload.items()
-    }
-    logger.info("%s 输入 | agent=%s | data=%s", colorize(f"[{node}]", "cyan"), colorize(agent_name, "magenta"), preview)
-
-
-def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[plan]", "cyan"), colorize(agent_name, "magenta"))
-    log_inputs("plan", agent_name, {"query": state["query"]})
-    human = HumanMessage(content=with_memory_context(state, f"用户需求：{state['query']}"))
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[plan]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[plan]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[plan]", "yellow"))
-    emit("plan", last_message.content)
-    return {
-        "plan": last_message.content,
-        "messages": [human, last_message],
-    }
-
-
-def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[web_search]", "cyan"), colorize(agent_name, "magenta"))
-    log_inputs("web_search", agent_name, {"plan": state["plan"], "query": state["query"]})
-    human = HumanMessage(content=with_memory_context(state, f"计划：{state['plan']}\n问题：{state['query']}"))
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[web_search]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[web_search]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[web_search]", "yellow"))
-    emit("web_search", last_message.content)
-    return {
-        "web_search": last_message.content,
-        "messages": [human, last_message],
-    }
-
-
-def local_rag_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[local_rag]", "cyan"), colorize(agent_name, "magenta"))
-    log_inputs("local_rag", agent_name, {"plan": state["plan"], "query": state["query"]})
-    human = HumanMessage(content=with_memory_context(state, f"计划：{state['plan']}\n问题：{state['query']}"))
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[local_rag]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[local_rag]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[local_rag]", "yellow"))
-    emit("local_rag", last_message.content)
-    return {
-        "local_rag": last_message.content,
-        "messages": [human, last_message],
-    }
-
-
-def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[deep_dive]", "cyan"), colorize(agent_name, "magenta"))
-    if not state["web_search"] or not state["local_rag"]:
-        logger.info(
-            "%s 等待检索结果 | web=%s | local=%s",
-            colorize("[deep_dive]", "yellow"),
-            bool(state["web_search"]),
-            bool(state["local_rag"]),
-        )
-        return {}
-    log_inputs("deep_dive", agent_name, {"query": state["query"], "web_search": state["web_search"], "local_rag": state["local_rag"]})
-    human = HumanMessage(
-        content=(
-            with_memory_context(state, f"问题：{state['query']}") + "\n"
-            f"网络资料：{state['web_search']}\n"
-            f"本地资料：{state['local_rag']}"
-        )
-    )
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[deep_dive]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[deep_dive]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[deep_dive]", "yellow"))
-    emit("deep_dive", last_message.content)
-    return {
-        "deep_dive": last_message.content,
-        "messages": [human, last_message],
-    }
-
-
-def analyze_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[analyze]", "cyan"), colorize(agent_name, "magenta"))
-    log_inputs("analyze", agent_name, {"query": state["query"], "plan": state["plan"], "deep_dive": state["deep_dive"]})
-    human = HumanMessage(
-        content=(
-            with_memory_context(state, f"问题：{state['query']}") + "\n"
-            f"计划：{state['plan']}\n"
-            f"深度结论：{state['deep_dive']}"
-        )
-    )
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[analyze]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[analyze]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[analyze]", "yellow"))
-    emit("analyze", last_message.content)
-    return {
-        "analysis": last_message.content,
-        "messages": [human, last_message],
-    }
-
 
 def codegen_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     logger.info("%s 开始 | agent=%s", colorize("[codegen]", "cyan"), colorize(agent_name, "magenta"))
@@ -242,34 +68,6 @@ def codegen_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         "code": last_message.content,
         "messages": [human, last_message],
     }
-
-
-def write_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[write]", "cyan"), colorize(agent_name, "magenta"))
-    log_inputs("write", agent_name, {"query": state["query"], "plan": state["plan"], "analysis": state["analysis"], "code": state["code"]})
-    human = HumanMessage(
-        content=(
-            with_memory_context(state, f"问题：{state['query']}") + "\n"
-            f"计划：{state['plan']}\n"
-            f"分析：{state['analysis']}\n"
-            f"方案与代码：{state['code']}\n"
-            f"请输出最终答案。"
-        )
-    )
-    result = agent.invoke({"messages": state["messages"] + [human]})
-    last_message = result["messages"][-1]
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize("[write]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize("[write]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize("[write]", "yellow"))
-    emit("write", last_message.content)
-    return {
-        "draft": last_message.content,
-        "final": last_message.content,
-        "messages": [human, last_message],
-    }
-
 
 def build_memory_manager(config: AppConfig) -> Optional[MemoryManager]:
     if not config.enable_memory:
@@ -295,7 +93,6 @@ def build_memory_manager(config: AppConfig) -> Optional[MemoryManager]:
     except Exception as exc:
         logger.exception("初始化 MemoryManager 失败，已禁用外部记忆: %s", exc)
         return None
-
 
 def build_checkpointer(config: AppConfig):
     global CHECKPOINTER_CONTEXT
@@ -359,7 +156,6 @@ def build_checkpointer(config: AppConfig):
         logger.info("%s 使用内存 checkpointer", colorize("[memory]", "green"))
     return InMemorySaver()
 
-
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="multi-agent memory runner")
     parser.add_argument("--config", type=str, default=None)
@@ -376,7 +172,6 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--memory-top-k", type=int, default=None)
     parser.add_argument("--once-query", type=str, default=None)
     return parser.parse_args()
-
 
 def build_runtime_config(args: argparse.Namespace) -> AppConfig:
     config = AppConfig.from_file(args.config) if args.config else AppConfig.from_file()
@@ -412,7 +207,6 @@ def build_runtime_config(args: argparse.Namespace) -> AppConfig:
     )
     return config
 
-
 @dataclass(frozen=True)
 class AgentBundle:
     intent_router: any
@@ -424,7 +218,6 @@ class AgentBundle:
     direct_responder: any
     writer: any
 
-
 def build_agent(model: str, api_key: str, prompt_key: str, temperature: float, tools: list):
     if api_key:
         os.environ["DASHSCOPE_API_KEY"] = api_key
@@ -432,14 +225,30 @@ def build_agent(model: str, api_key: str, prompt_key: str, temperature: float, t
     prompt = PROMPTS[prompt_key]
     return create_agent(model=llm, tools=tools, system_prompt=prompt)
 
-
 def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
     rag_config = RAGConfig(
         milvus_host=config.milvus_host,
         milvus_port=config.milvus_port,
         collection_name=config.milvus_collection,
     )
-    init_rag_system(api_key=api_key, config=rag_config)
+    init_rag_system(api_key=api_key, config=rag_config, tenant_id=config.tenant_id)
+    # Initialize enterprise search module
+    from .tools import init_search_from_config
+    init_search_from_config(
+        api_key=api_key,
+        serper_api_key=config.serper_api_key,
+        tavily_api_key=config.tavily_api_key,
+        search_backends=config.search_backends,
+        search_fallback_backends=config.search_fallback_backends,
+        search_count=config.search_count,
+        search_timeout=config.search_timeout,
+        search_fetch_timeout=config.search_fetch_timeout,
+        search_max_workers=config.search_max_workers,
+        search_cache_enabled=config.search_cache_enabled,
+        search_cache_ttl_seconds=config.search_cache_ttl_seconds,
+        search_rewrite_enabled=config.search_rewrite_enabled,
+        search_fetch_enabled=config.search_fetch_enabled,
+    )
     # 去掉每个 Agent 强制绑定的 tools，只做信息抽取，降低 System Prompt 长度
     return AgentBundle(
         intent_router=build_agent(model, api_key, "intent_router", 0.0, []),
@@ -451,7 +260,6 @@ def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
         direct_responder=build_agent(model, api_key, "direct_answer", 0.2, []),
         writer=build_agent(model, api_key, "write", 0.4, []),
     )
-
 
 def run_query(app, config: AppConfig, query: str):
     memory_context = ""
@@ -491,7 +299,6 @@ def run_query(app, config: AppConfig, query: str):
             logger.warning("%s 持久化记忆失败，已跳过: %s", colorize("[memory]", "yellow"), exc)
     return final
 
-
 def read_user_input(prompt: str = "你: ") -> str:
     try:
         return input(prompt)
@@ -504,7 +311,6 @@ def read_user_input(prompt: str = "你: ") -> str:
         recovered = raw.decode(encoding, errors="replace").rstrip("\r\n")
         logger.warning("%s 检测到输入编码异常，已使用容错解码。", colorize("[input]", "yellow"))
         return recovered
-
 
 def main():
     global MEMORY_MANAGER
@@ -543,7 +349,6 @@ def main():
     if CHECKPOINTER_CONTEXT:
         CHECKPOINTER_CONTEXT.__exit__(None, None, None)
         CHECKPOINTER_CONTEXT = None
-
 
 if __name__ == "__main__":
     main()

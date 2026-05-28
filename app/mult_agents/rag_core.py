@@ -1,3 +1,4 @@
-"""RAG 兼容导出模块：对外暴露 RAGConfig 与 RAGSystem。"""
+"""RAG compatibility export module."""
+from .rag.core import RAGConfig, RAGSystem, RAGManager, RetrievalRecord
 
-from .rag.core import RAGConfig, RAGSystem
+__all__ = ["RAGConfig", "RAGSystem", "RAGManager", "RetrievalRecord"]

@@ -1,79 +1,27 @@
-"""节点执行模块：实现意图识别、检索、证据裁判、分析与写作等节点逻辑。"""
+"""?????????????????????????????????"""
 
 import json
 import logging
-import os
 import re
-from functools import partial
 
 from langchain_core.messages import HumanMessage
 
 from .state import ResearchState
 from .tools import bocha_web_search_records, search_knowledge_base_records
+from .utils import (
+    colorize,
+    emit,
+    collect_tool_calls,
+    with_memory_context,
+    log_inputs,
+    invoke_json_agent,
+    _last_content,
+    _load_json,
+    bind_agent,
+)
 
 
 logger = logging.getLogger("mult_agents")
-
-
-ANSI = {
-    "reset": "\033[0m",
-    "cyan": "\033[36m",
-    "magenta": "\033[35m",
-    "yellow": "\033[33m",
-    "green": "\033[32m",
-    "red": "\033[31m",
-}
-
-
-def colorize(text: str, color: str) -> str:
-    if os.getenv("NO_COLOR"):
-        return text
-    code = ANSI.get(color, "")
-    if not code:
-        return text
-    return f"{code}{text}{ANSI['reset']}"
-
-
-def emit(node: str, content: str):
-    preview = content.replace("\n", " ")
-    if len(preview) > 400:
-        preview = preview[:400] + "..."
-    logger.info("%s 输出: %s", colorize(f"[{node}]", "yellow"), preview)
-
-
-def collect_tool_calls(messages) -> tuple[list, list]:
-    tools = []
-    tool_outputs = []
-    for msg in messages:
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            for call in tool_calls:
-                name = call.get("name") if isinstance(call, dict) else None
-                if name:
-                    tools.append(name)
-        name = getattr(msg, "name", None)
-        msg_type = getattr(msg, "type", None)
-        if msg_type == "tool" and name:
-            tools.append(name)
-            output = getattr(msg, "content", "")
-            if output:
-                tool_outputs.append(f"{name}: {output}")
-    return tools, tool_outputs
-
-
-def with_memory_context(state: ResearchState, user_prompt: str) -> str:
-    memory_context = state.get("memory_context", "").strip()
-    if not memory_context:
-        return user_prompt
-    return f"{user_prompt}\n\n[跨会话记忆]\n{memory_context}"
-
-
-def log_inputs(node: str, agent_name: str, payload: dict):
-    preview = {
-        key: (value[:200] + "..." if isinstance(value, str) and len(value) > 200 else value)
-        for key, value in payload.items()
-    }
-    logger.info("%s 输入 | agent=%s | data=%s", colorize(f"[{node}]", "cyan"), colorize(agent_name, "magenta"), preview)
 
 
 def detect_intent(query: str) -> str:
@@ -162,7 +110,7 @@ def _load_json(text: str, fallback: dict) -> dict:
     return fallback
 
 
-def _invoke_json_agent(state: ResearchState, prompt: str, agent, agent_name: str, node: str, fallback: dict) -> tuple[dict, str, list]:
+def invoke_json_agent(state: ResearchState, prompt: str, agent, agent_name: str, node: str, fallback: dict) -> tuple[dict, str, list]:
     human = HumanMessage(content=with_memory_context(state, prompt))
     # Optimization: Do NOT pass state["messages"] to avoid token accumulation
     # Each node only needs its specific instruction and the current state data
@@ -288,25 +236,37 @@ def _derive_search_plan(outline: list[dict], sub_questions: list[str], _research
 
 
 def _build_queries(state: ResearchState, source_preference: str) -> list[dict]:
+    """Build search queries from plan or supplementary plan.
+
+    In re-search iterations, supplementary_queries are used as the plan.
+    Each query's source_preference is respected:
+      - "hybrid" ? dispatched to both web and local
+      - "web" / "local" ? only to the matching side
+    """
     queries: list[dict] = []
-    
-    # Check if we are in re-search iteration
+
     iteration = state.get("iteration", 0)
     if iteration > 0 and state.get("supplementary_queries"):
         base_plan = state.get("supplementary_queries", [])
     else:
         base_plan = state.get("search_plan", [])
-        
+
     for item in base_plan:
         if not isinstance(item, dict):
             continue
-        pref = item.get("source_preference", "hybrid")
-        if pref in (source_preference, "hybrid"):
+        pref = str(item.get("source_preference", "hybrid")).strip().lower()
+        # Match: same preference or hybrid goes everywhere
+        if pref == source_preference or pref == "hybrid":
             query = str(item.get("query", "")).strip()
             if query:
                 queries.append(item)
     if not queries:
-        queries.append({"section_id": "sec_1", "query": state["query"], "source_preference": source_preference, "reason": "fallback"})
+        queries.append({
+            "section_id": "sec_1",
+            "query": state["query"],
+            "source_preference": source_preference,
+            "reason": "fallback",
+        })
     return queries[:6]
 
 
@@ -514,6 +474,7 @@ def _fallback_web_evidence(records: list[dict]) -> dict:
                 "source_type": "web",
                 "reliability_hint": "official" if _is_official_domain(record.get("domain", "")) else "unknown",
                 "supports": [],
+                "supports_questions": record.get("supports_questions", []),
                 "notes": "",
             }
         )
@@ -532,6 +493,7 @@ def _fallback_local_evidence(records: list[dict]) -> dict:
                 "source_type": "local",
                 "reliability_hint": "internal",
                 "supports": [],
+                "supports_questions": record.get("supports_questions", []),
                 "notes": "",
             }
         )
@@ -539,22 +501,135 @@ def _fallback_local_evidence(records: list[dict]) -> dict:
 
 
 def _is_official_domain(domain: str) -> bool:
-    value = domain.lower()
-    return value.endswith(".gov.cn") or value.endswith(".gov") or value.endswith(".edu") or value.endswith(".edu.cn") or "gov" in value or "official" in value
+    """Check if domain belongs to government, education, or recognized authority.
+
+    Uses suffix matching only (no substring) to avoid false positives
+    like 'government-blog.com' or 'gov-news.net'.
+    """
+    value = domain.lower().strip()
+    if not value:
+        return False
+    if value.endswith((".gov.cn", ".gov", ".edu", ".edu.cn", ".mil", ".ac.cn")):
+        return True
+    if value.endswith((".int", ".go.jp", ".gov.uk", ".gov.au", ".gov.sg", ".europa.eu")):
+        return True
+    return False
 
 
 def _score_evidence(record: dict) -> tuple[float, str]:
+    """Score evidence reliability based on source type, domain authority, and content signals."""
     source_type = record.get("source_type")
     if source_type == "local":
-        return 0.92, "企业内部知识库证据，默认高可信"
+        return 0.92, "???????????????"
+
     domain = str(record.get("domain", "")).lower()
+
     if _is_official_domain(domain):
-        return 0.88, "官方或权威机构域名"
-    if any(word in domain for word in ["news", "finance", "reuters", "bloomberg", "people", "xinhuanet"]):
-        return 0.72, "主流媒体域名"
-    if domain:
-        return 0.58, "普通互联网来源，需要交叉验证"
-    return 0.45, "来源信息不完整"
+        base_score = 0.88
+        reason = "?????????"
+    elif any(domain.endswith(suffix) for suffix in [
+        "reuters.com", "bloomberg.com", "people.com.cn", "xinhuanet.com",
+        "bbc.com", "bbc.co.uk", "economist.com", "nature.com", "science.org",
+        "who.int", "worldbank.org", "imf.org", "un.org", "wto.org",
+    ]):
+        base_score = 0.82
+        reason = "??????/????"
+    elif any(word in domain for word in ["news", "finance"]):
+        base_score = 0.70
+        reason = "??????"
+    elif domain:
+        base_score = 0.55
+        reason = "???????"
+    else:
+        base_score = 0.40
+        reason = "????????"
+
+    snippet = str(record.get("snippet", "")).strip()
+    title = str(record.get("title", "")).strip()
+    score = base_score
+
+    if len(snippet) > 200:
+        score = min(score + 0.04, 0.95)
+    elif len(snippet) < 30:
+        score = max(score - 0.05, 0.30)
+
+    if len(title) < 5:
+        score = max(score - 0.03, 0.30)
+
+    if not record.get("url"):
+        score = max(score - 0.05, 0.30)
+
+    return round(score, 4), reason
+
+
+def _normalize_text_for_dedup(text: str) -> str:
+    """Normalize text for near-duplicate detection."""
+    import unicodedata
+    text = unicodedata.normalize("NFKC", str(text))
+    cleaned = "".join(
+        ch.lower() if ch.isascii() and ch.isalnum() else (ch if "一" <= ch <= "鿿" else " ")
+        for ch in text
+    )
+    return " ".join(cleaned.split())
+
+
+def _estimate_similarity(a: str, b: str) -> float:
+    """Simple bigram overlap similarity."""
+    if not a or not b:
+        return 0.0
+    a_bigrams = {a[i : i + 2] for i in range(len(a) - 1)}
+    b_bigrams = {b[i : i + 2] for i in range(len(b) - 1)}
+    if not a_bigrams or not b_bigrams:
+        return 0.0
+    return len(a_bigrams & b_bigrams) / len(a_bigrams | b_bigrams)
+
+
+def _dedupe_by_content(items: list[dict], threshold: float = 0.55) -> list[dict]:
+    """Remove near-duplicate evidence items by content similarity."""
+    if len(items) <= 1:
+        return items[:]
+    keep: list[dict] = []
+    for item in items:
+        text_a = _normalize_text_for_dedup(
+            str(item.get("snippet", "")) + " " + str(item.get("title", ""))
+        )
+        is_dup = False
+        for kept in keep:
+            text_b = _normalize_text_for_dedup(
+                str(kept.get("snippet", "")) + " " + str(kept.get("title", ""))
+            )
+            if _estimate_similarity(text_a, text_b) >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(item)
+    return keep
+
+
+def _detect_cross_verification(evidence_pool: list[dict]) -> list[dict]:
+    """Boost reliability scores when multiple independent sources support the same claim."""
+    if len(evidence_pool) < 2:
+        return evidence_pool[:]
+    result = [dict(item) for item in evidence_pool]
+    for i, item in enumerate(result):
+        item_questions = set(item.get("supports_questions", []) or [])
+        if not item_questions:
+            continue
+        corroboration_count = 0
+        for j, other in enumerate(result):
+            if i == j:
+                continue
+            other_questions = set(other.get("supports_questions", []) or [])
+            if item_questions & other_questions:
+                corroboration_count += 1
+        if corroboration_count >= 2:
+            boost = min(0.06, 0.02 * corroboration_count)
+            item["reliability_score"] = round(
+                min(item.get("reliability_score", 0.5) + boost, 0.97), 4
+            )
+            item.setdefault("cross_verified", True)
+            item.setdefault("cross_verification_count", corroboration_count)
+    return result
 
 
 def _dedupe_sources(items: list[dict], key_fields: list[str]) -> list[dict]:
@@ -570,37 +645,82 @@ def _dedupe_sources(items: list[dict], key_fields: list[str]) -> list[dict]:
 
 
 def _fallback_audit(state: ResearchState) -> dict:
-    evidence_pool = []
-    source_index = []
-    audit_flags = []
-    for record in state.get("web_evidence", []) + state.get("local_evidence", []):
+    """Robust fallback audit: score, cross-verify, dedup, and detect conflicts."""
+    evidence_pool: list[dict] = []
+    source_index: list[dict] = []
+    audit_flags: list[dict] = []
+
+    all_records = state.get("web_evidence", []) + state.get("local_evidence", [])
+
+    for record in all_records:
         score, reason = _score_evidence(record)
         normalized = dict(record)
         normalized["reliability_score"] = score
         normalized["reliability_reason"] = reason
-        normalized["source_label"] = record.get("title") or record.get("doc_id") or record.get("url") or record.get("source_id")
+        normalized["source_label"] = (
+            record.get("title") or record.get("doc_id")
+            or record.get("url") or record.get("source_id")
+        )
         normalized.setdefault("supports", [])
         normalized.setdefault("refutes", [])
+        normalized.setdefault("supports_questions", [])
         evidence_pool.append(normalized)
-        locator = record.get("url") or record.get("doc_id") or ""
-        if score < 0.6:
-            audit_flags.append({"type": "low_confidence", "target": record.get("source_id"), "reason": reason})
+
+    evidence_pool.sort(key=lambda x: x.get("reliability_score", 0), reverse=True)
+    evidence_pool = _dedupe_by_content(evidence_pool, threshold=0.55)
+    evidence_pool = _detect_cross_verification(evidence_pool)
+
+    for item in evidence_pool:
+        sid = str(item.get("source_id", ""))
+        score = item.get("reliability_score", 0)
+        locator = item.get("url") or item.get("doc_id") or ""
+        if score < 0.45:
+            audit_flags.append({
+                "type": "low_confidence",
+                "target": sid,
+                "reason": f"??????? ({score:.2f}): {item.get('reliability_reason', '')}",
+            })
         else:
-            source_index.append(
-                {
-                    "source_id": record.get("source_id"),
-                    "label": normalized["source_label"],
-                    "locator": locator or "未提供定位信息",
-                    "source_type": record.get("source_type", "source"),
-                }
-            )
+            source_index.append({
+                "source_id": sid,
+                "label": item["source_label"],
+                "locator": locator or "???????",
+                "source_type": item.get("source_type", "source"),
+            })
+
+    question_groups: dict[str, list[dict]] = {}
+    for item in evidence_pool:
+        for q in (item.get("supports_questions") or []):
+            q = str(q)
+            question_groups.setdefault(q, []).append(item)
+
+    for question, items in question_groups.items():
+        if len(items) < 2:
+            continue
+        scores = [it.get("reliability_score", 0) for it in items]
+        if max(scores) - min(scores) > 0.35:
+            audit_flags.append({
+                "type": "divergent_quality",
+                "target": question,
+                "reason": f"????????????? (range={max(scores)-min(scores):.2f})???????",
+            })
+
     for hypo in state.get("hypotheses", []):
         hypo_id = hypo.get("id")
-        related = [item for item in evidence_pool if hypo_id in item.get("supports", []) or hypo_id in item.get("refutes", [])]
+        related = [
+            item for item in evidence_pool
+            if hypo_id in item.get("supports", [])
+            or hypo_id in item.get("refutes", [])
+        ]
         if not related:
-            audit_flags.append({"type": "missing_evidence", "target": hypo_id, "reason": "缺少直接关联证据"})
+            audit_flags.append({
+                "type": "missing_evidence",
+                "target": hypo_id,
+                "reason": "????????",
+            })
+
     return {
-        "summary": "完成证据评分与审计。",
+        "summary": "??????????????????",
         "evidence_pool": evidence_pool,
         "audit_flags": audit_flags,
         "source_index": _dedupe_sources(source_index, ["source_id"]),
@@ -947,7 +1067,7 @@ def intent_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         f"规则引擎初判：{rule_route}\n"
         "请输出 JSON：{\"route\":\"direct|multiagent\",\"reason\":\"...\"}"
     )
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         prompt,
         agent,
@@ -983,7 +1103,7 @@ def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     logger.info("%s 开始 | agent=%s", colorize("[plan]", "cyan"), colorize(agent_name, "magenta"))
     log_inputs("plan", agent_name, {"query": state["query"]})
     fallback = _default_plan(state)
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         f"用户需求：{state['query']}\n请先做大纲与问题拆解，再输出规划 JSON。",
         agent,
@@ -1066,7 +1186,7 @@ def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchSta
         }
     logger.info("[web_search_node] 调用 LLM 整理证据 | raw_records=%s", len(raw_records))
     fallback = _fallback_web_evidence(raw_records)
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         "请基于以下网页证据整理结构化 JSON。\n"
         f"原问题：{state['query']}\n"
@@ -1151,7 +1271,7 @@ def local_rag_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
             "local_rag_trace": query_traces,
         }
     fallback = _fallback_local_evidence(raw_records)
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         "请基于以下知识库证据整理结构化 JSON。\n"
         f"原问题：{state['query']}\n"
@@ -1193,7 +1313,7 @@ def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
         logger.info("%s 等待检索结果", colorize("[deep_dive]", "yellow"))
         return {}
     fallback = _fallback_audit(state)
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         "请对 web 与 local 证据进行评分、去重、冲突审计，并只输出 JSON。\n"
         f"问题：{state['query']}\n"
@@ -1217,6 +1337,10 @@ def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
             evidence_pool.append(item)
     if not evidence_pool:
         evidence_pool = fallback["evidence_pool"]
+    # Post-process: content dedup + cross-verification
+    evidence_pool.sort(key=lambda x: x.get("reliability_score", 0), reverse=True)
+    evidence_pool = _dedupe_by_content(evidence_pool, threshold=0.55)
+    evidence_pool = _detect_cross_verification(evidence_pool)
     existing_ids = {str(item.get("source_id", "")).strip() for item in evidence_pool if isinstance(item, dict)}
     for record in raw_evidence:
         sid = str(record.get("source_id", "")).strip()
@@ -1265,20 +1389,10 @@ def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
     }
 
 
-def _fallback_analysis(state: ResearchState) -> dict:
-    return {
-        "analysis_summary": "默认分析结论",
-        "needs_more_research": False,
-        "missing_gaps": [],
-        "findings": [],
-        "claim_map": [],
-        "next_actions": [],
-    }
-
 def analyze_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     logger.info("%s 开始 | agent=%s", colorize("[analyze]", "cyan"), colorize(agent_name, "magenta"))
     fallback = _fallback_analysis(state)
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         "请基于证据池输出结论映射 JSON，并评估证据完备性：\n"
         f"原问题：{state['query']}\n"
@@ -1324,7 +1438,7 @@ def reflect_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         "请生成新的补搜计划以填补缺口。"
     )
     
-    payload, content, messages = _invoke_json_agent(
+    payload, content, messages = invoke_json_agent(
         state,
         prompt,
         agent,
