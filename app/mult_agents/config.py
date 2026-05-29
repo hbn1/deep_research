@@ -17,6 +17,7 @@ if _ENV_PATH.exists():
 class AppConfig:
     api_key: str
     model: str
+    summary_model: str
     thread_id: str
     user_id: str
     tenant_id: str
@@ -50,6 +51,9 @@ class AppConfig:
     search_cache_ttl_seconds: int = 3600
     search_rewrite_enabled: bool = True
     search_fetch_enabled: bool = True
+    # 模型路由：direct / 轻量节点用小模型，multi-agent 核心节点用大模型
+    small_model: str = "qwen-turbo"
+    node_model_overrides: str = ""
 
     def with_overrides(self, **kwargs) -> "AppConfig":
         cleaned = {k: v for k, v in kwargs.items() if v is not None}
@@ -89,7 +93,7 @@ class AppConfig:
         config_path = Path(path) if path else AppConfig._default_config_path()
         if not config_path.exists():
             raise FileNotFoundError(f"配置文件不存在: {config_path}")
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        data = json.loads(config_path.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             raise ValueError("配置文件格式错误")
 
@@ -105,6 +109,7 @@ class AppConfig:
         return AppConfig(
             api_key=api_key,
             model=_s("model", "MODEL", "qwen-plus"),
+            summary_model=_s("summary_model", "SUMMARY_MODEL", "qwen-plus"),
             thread_id=_s("thread_id", "THREAD_ID", "default"),
             user_id=_s("user_id", "USER_ID", "default_user"),
             tenant_id=_s("tenant_id", "TENANT_ID", "default_tenant"),
@@ -137,6 +142,8 @@ class AppConfig:
             search_cache_ttl_seconds=_i("search_cache_ttl_seconds", "SEARCH_CACHE_TTL_SECONDS", 3600),
             search_rewrite_enabled=_b("search_rewrite_enabled", "SEARCH_REWRITE_ENABLED", True),
             search_fetch_enabled=_b("search_fetch_enabled", "SEARCH_FETCH_ENABLED", True),
+            small_model=_s("small_model", "SMALL_MODEL", "qwen-turbo"),
+            node_model_overrides=_s("node_model_overrides", "NODE_MODEL_OVERRIDES", ""),
         )
 
     @staticmethod
@@ -154,6 +161,7 @@ class AppConfig:
         return AppConfig(
             api_key=api_key,
             model=_s("model", "MODEL", "qwen-plus"),
+            summary_model=_s("summary_model", "SUMMARY_MODEL", "qwen-plus"),
             thread_id=_s("thread_id", "THREAD_ID", "default"),
             user_id=_s("user_id", "USER_ID", "default_user"),
             tenant_id=_s("tenant_id", "TENANT_ID", "default_tenant"),
@@ -186,4 +194,6 @@ class AppConfig:
             search_cache_ttl_seconds=_i("search_cache_ttl_seconds", "SEARCH_CACHE_TTL_SECONDS", 3600),
             search_rewrite_enabled=_b("search_rewrite_enabled", "SEARCH_REWRITE_ENABLED", True),
             search_fetch_enabled=_b("search_fetch_enabled", "SEARCH_FETCH_ENABLED", True),
+            small_model=_s("small_model", "SMALL_MODEL", "qwen-turbo"),
+            node_model_overrides=_s("node_model_overrides", "NODE_MODEL_OVERRIDES", ""),
         )

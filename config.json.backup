@@ -1,0 +1,41 @@
+{
+  "api_key": "",
+  "model": "qwen-turbo",
+  "tenant_id": "default_tenant",
+  "user_id": "default_user",
+  "thread_id": "default",
+  "max_iterations": 3,
+  "enable_memory": true,
+  "short_term_ttl_seconds": 604800,
+  "short_term_max_messages": 30,
+  "short_term_summary_threshold": 20,
+  "short_term_backend": "postgres",
+  "long_term_backend": "postgres",
+  "long_term_scope": "user",
+  "save_conversation_task": false,
+  "checkpointer_backend": "postgres",
+  "enable_milvus": true,
+  "memory_top_k": 6,
+  "redis_url": "",
+  "postgres_dsn": "",
+  "milvus_host": "",
+  "milvus_port": 19530,
+  "milvus_collection": "mult_agent_memory",
+  "serper_api_key": "",
+  "tavily_api_key": "",
+  "search_backends": [
+    "bocha"
+  ],
+  "search_fallback_backends": [
+    "serper",
+    "tavily"
+  ],
+  "search_count": 4,
+  "search_timeout": 15,
+  "search_fetch_timeout": 8,
+  "search_max_workers": 6,
+  "search_cache_enabled": true,
+  "search_cache_ttl_seconds": 3600,
+  "search_rewrite_enabled": true,
+  "search_fetch_enabled": true
+}

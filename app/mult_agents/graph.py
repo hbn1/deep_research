@@ -1,4 +1,4 @@
-"""工作流编排模块：定义 LangGraph 节点、条件路由与整体执行路径。"""
+"""Workflow orchestration: LangGraph nodes, conditional routing, and execution path."""
 import logging
 from langgraph.graph import StateGraph, START, END
 
@@ -13,6 +13,7 @@ from .nodes import (
     analyze_node,
     reflect_node,
     write_node,
+    memory_reflect_node,
 )
 from .state import ResearchState
 
@@ -29,17 +30,21 @@ def route_after_intent(state: ResearchState) -> str:
 def should_continue_research(state: ResearchState) -> str:
     iteration = state.get("iteration", 0)
     max_iter = state.get("max_iterations", 2)
-    
-    # If we reached max iterations, stop and write report
+
     if iteration >= max_iter:
         return "write"
-        
-    # If analyst found missing gaps and requested more research, go to reflect
+
     if state.get("needs_more_research", False):
         return "reflect"
-        
-    # Otherwise, we have enough evidence, go to write report
+
     return "write"
+
+
+def route_after_write(state: ResearchState) -> str:
+    """After writing, optionally run memory reflection."""
+    if not state.get("memory_reflect_done", False):
+        return "memory_reflect"
+    return "end"
 
 
 def build_app(agents, checkpointer):
@@ -53,7 +58,8 @@ def build_app(agents, checkpointer):
     workflow.add_node("analyze", bind_agent(analyze_node, agents.analyst, "analyst"))
     workflow.add_node("reflect", bind_agent(reflect_node, agents.planner, "planner"))
     workflow.add_node("write", bind_agent(write_node, agents.writer, "writer"))
-    
+    workflow.add_node("memory_reflect", bind_agent(memory_reflect_node, agents.writer, "memory_reflect"))
+
     workflow.add_edge(START, "intent")
     workflow.add_conditional_edges(
         "intent",
@@ -68,7 +74,7 @@ def build_app(agents, checkpointer):
     workflow.add_edge("web_search", "deep_dive")
     workflow.add_edge("local_rag", "deep_dive")
     workflow.add_edge("deep_dive", "analyze")
-    
+
     workflow.add_conditional_edges(
         "analyze",
         should_continue_research,
@@ -77,10 +83,20 @@ def build_app(agents, checkpointer):
             "write": "write"
         }
     )
-    
+
     workflow.add_edge("reflect", "web_search")
     workflow.add_edge("reflect", "local_rag")
     workflow.add_edge("direct_answer", END)
-    workflow.add_edge("write", END)
-    
+
+    # After write, optionally run memory_reflect before ending
+    workflow.add_conditional_edges(
+        "write",
+        route_after_write,
+        {
+            "memory_reflect": "memory_reflect",
+            "end": END,
+        }
+    )
+    workflow.add_edge("memory_reflect", END)
+
     return workflow.compile(checkpointer=checkpointer)

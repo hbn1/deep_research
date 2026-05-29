@@ -67,7 +67,7 @@ def with_memory_context(state: ResearchState, user_prompt: str) -> str:
     memory_context = state.get("memory_context", "").strip()
     if not memory_context:
         return user_prompt
-    return f"{user_prompt}\n\n[?????]\n{memory_context}"
+    return f"{user_prompt}\n\n[Memory Context]\n{memory_context}"
 
 
 def log_inputs(node: str, agent_name: str, payload: dict):

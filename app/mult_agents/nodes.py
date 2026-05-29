@@ -1,8 +1,10 @@
-"""?????????????????????????????????"""
+﻿"""?????????????????????????????????"""
 
 import json
 import logging
 import re
+from datetime import datetime
+from functools import partial
 
 from langchain_core.messages import HumanMessage
 
@@ -25,104 +27,180 @@ logger = logging.getLogger("mult_agents")
 
 
 def detect_intent(query: str) -> str:
-    normalized_query = query.strip()
-    force_multiagent_keywords = [
-        "调查",
-        "调研",
-        "来源",
-        "证据",
-        "检索统计",
-        "来源清单",
-        "重大新闻",
-        "热门项目",
-        "趋势",
-        "新闻",
-        "最新",
-        "盘点",
+    """Rule-based intent detection. Fast path: skip LLM when confident.
+
+    Strategy: only route multiagent for queries that clearly need
+    multi-source research, evidence gathering, or deep analysis.
+    Simple factual Q&A, greetings, definitions go direct.
+    """
+    q = query.strip()
+    if not q:
+        return "direct"
+
+    # ---- Direct (simple) signals (ASCII-safe patterns) ----
+    direct_patterns = [
+        r'^(hi|hello|hey)\b',
+        r'^who are you',
+        r'^what can you do',
+        r'^(thanks|thank you|thx)',
+        r'^(bye|goodbye)',
+        r'^weather',
+        r'^what time',
+        r'^calculate\s',
+        r'^translate',
     ]
-    if re.search(r"20\d{2}年", normalized_query) and any(word in normalized_query for word in ["趋势", "新闻", "调研", "调查", "盘点"]):
-        return "multiagent"
-    if any(word in query for word in force_multiagent_keywords):
-        return "multiagent"
-    keywords = [
-        "调研",
-        "研究",
-        "调查",
-        "盘点",
-        "热门",
-        "趋势",
-        "榜单",
-        "分析",
-        "方案",
-        "架构",
-        "设计",
-        "对比",
-        "报告",
-        "代码",
-        "实现",
-        "落地",
-        "检索",
-        "知识库",
-        "证据",
-        "来源",
-        "溯源",
-        "资料",
-        "手册",
-        "验证",
-        "数据",
-        "模型",
+    for pat in direct_patterns:
+        if re.search(pat, q.lower()):
+            return "direct"
+
+    # ---- Direct: Chinese simple signals (substring match) ----
+    direct_cn = [
+        "你好",    # ??
+        "谢谢",    # ??
+        "再见",    # ??
+        "你是谁",  # ???
+        "你能做什么",  # ?????
+        "介绍一下你自己",  # ???????
+        "天气怎么样",  # 天气
+        "天气",       # 天气
+        "时间",       # 时间
+        "现在几点",      # ????
     ]
-    return "multiagent" if any(word in query for word in keywords) else "direct"
+    # ---- Simple Chinese queries (weather, time, date) ----
+    simple_cn_patterns = [
+        "天气", "时间", "日期", "几点", "星期几",
+    ]
+    if any(p in q for p in simple_cn_patterns):
+        return "direct"
 
+    # Ultra-short greetings (<=4 chars)
+    if len(q) <= 4:
+        for phrase in direct_cn:
+            if phrase in q:
+                return "direct"
+        return "direct"
 
-def bind_agent(node_func, agent, agent_name: str):
-    return partial(node_func, agent=agent, agent_name=agent_name)
+    # Research keywords (substring match, not regex)
+    research_keywords = [
+        "分析",     # ??
+        "对比",     # ??
+        "趋势",     # ??
+        "研究",     # ??
+        "调查",     # ??
+        "报告",     # ??
+        "方案",     # ??
+        "盘点",     # ??
+        "架构",     # ??
+        "有哪些",   # ???
+        "哪些",     # ??
+        "推荐",     # ??
+        "主流",     # ??
+        "最新",     # ??
+        "当前",     # ??
+        "最近",     # ??
+        "近期",     # ??
+        "排名",     # ??
+        "榜单",     # ??
+        "评价",     # ??
+        "评测",     # ??
+        "选型",     # ??
+        "落地",     # ??
+        "实践",     # ??
+        "案例",     # ??
+        "代码",     # ??
+        "实现",     # ??
+        "设计",     # ??
+        "原理",     # ??
+        "流程",     # ??
+        "versus",
+        " vs ",               # English comparison
+    ]
+    has_any_research = any(kw in q for kw in research_keywords)
 
+    # No research keyword at all -> direct
+    if not has_any_research:
+        return "direct"
 
-def _last_content(result) -> str:
-    content = result["messages"][-1].content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
-    return str(content)
+    # ---- Strong multiagent signals ----
+    strong_signals = [
+        "调研报告",     # ????
+        "行业分析",     # ????
+        "竞品分析",     # ????
+        "市场调查",     # ????
+        "趋势分析",     # ????
+        "深度研究",     # ????
+        "比较分析",     # ????
+        "对比评测",     # ????
+        "技术选型",     # ????
+        "架构对比",     # ????
+        "方案对比",     # ????
+        "最新进展",     # ????
+        "最新趋势",     # ????
+        "重大新闻",     # ????
+        "有哪些",           # ???
+        "推荐",                 # ??
+        "排名",                 # ??
+        "榜单",                 # ??
+    ]
+    for signal in strong_signals:
+        if signal in q:
+            return "multiagent"
 
+    # ---- Moderate signals: need >=2 ----
+    moderate_signals = [
+        "分析",     # ??
+        "对比",     # ??
+        "趋势",     # ??
+        "研究",     # ??
+        "调查",     # ??
+        "报告",     # ??
+        "方案",     # ??
+        "盘点",     # ??
+        "架构",     # ??
+        "主流",     # ??
+        "最新",     # ??
+        "当前",     # ??
+        "评测",     # ??
+        "选型",     # ??
+        "案例",     # ??
+        "实现",     # ??
+        "设计",     # ??
+        "原理",     # ??
+        "流程",     # ??
+        "评价",     # ??
+        "排名",     # ??
+        " versus ",
+        " vs ",               # English comparison
+    ]
+    moderate_count = sum(1 for w in moderate_signals if w in q)
 
-def _extract_json_block(text: str) -> str:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
-        cleaned = re.sub(r"```$", "", cleaned).strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return cleaned[start : end + 1]
-    return cleaned
+    # Time markers amplify moderate signals
+    time_markers = [
+        r'20\d{2}', "今年", "去年",      # ??, ??
+        "最近", "近期", "当前",   # ??, ??, ??
+        "最新",                                    # ??
+    ]
+    has_time = any(
+        re.search(m, q) if m.startswith("20") else m in q
+        for m in time_markers
+    )
 
+    source_markers = ["GitHub", "github", "官方", "文档", "来源", "出处"]
+    has_source = any(m in q for m in source_markers)
 
-def _load_json(text: str, fallback: dict) -> dict:
-    try:
-        value = json.loads(_extract_json_block(text))
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        pass
-    return fallback
+    if moderate_count >= 2:
+        return "multiagent"
+    if moderate_count >= 1 and (has_time or has_source):
+        return "multiagent"
 
+    # Remaining: if has moderate signal AND enough substance
+    # Substance = length > 12, OR contains English technical terms
+    has_english_terms = bool(re.search(r'[A-Za-z][A-Za-z0-9_-]{2,}', q))
+    if moderate_count >= 1 and (len(q) > 12 or has_english_terms):
+        return "multiagent"
 
-def invoke_json_agent(state: ResearchState, prompt: str, agent, agent_name: str, node: str, fallback: dict) -> tuple[dict, str, list]:
-    human = HumanMessage(content=with_memory_context(state, prompt))
-    # Optimization: Do NOT pass state["messages"] to avoid token accumulation
-    # Each node only needs its specific instruction and the current state data
-    result = agent.invoke({"messages": [human]})
-    tools, tool_outputs = collect_tool_calls(result["messages"])
-    logger.info("%s 工具: %s", colorize(f"[{node}]", "green"), ", ".join(tools) if tools else "无")
-    for item in tool_outputs[:5]:
-        logger.info("%s 工具输出: %s", colorize(f"[{node}]", "green"), item[:400])
-    logger.info("%s LLM调用: 是 | 思考: 不可见", colorize(f"[{node}]", "yellow"))
-    content = _last_content(result)
-    emit(node, content)
-    return _load_json(content, fallback), content, [human, result["messages"][-1]]
+    # Default: direct for simple/ambiguous queries
+    return "direct"
 
 
 def _default_plan(state: ResearchState) -> dict:
@@ -1060,12 +1138,16 @@ def _ensure_reference_section(content: str, state: ResearchState) -> str:
 
 
 def intent_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[intent]", "cyan"), colorize(agent_name, "magenta"))
+    logger.info("%s ?? | agent=%s", colorize("[intent]", "cyan"), colorize(agent_name, "magenta"))
     rule_route = detect_intent(state["query"])
+    # Trust rule-based detection to skip unnecessary LLM call
+    if rule_route == "multiagent":
+        logger.info("%s ??: multiagent (????? LLM)", colorize("[intent]", "green"))
+        return {"intent": "multiagent", "draft": "", "messages": []}
+    # Only call LLM for ambiguous cases (rule says direct but might be wrong)
     prompt = (
-        f"用户问题：{state['query']}\n"
-        f"规则引擎初判：{rule_route}\n"
-        "请输出 JSON：{\"route\":\"direct|multiagent\",\"reason\":\"...\"}"
+        f"?????{state['query']}\n"
+        "??? JSON?{\"route\":\"direct|multiagent\",\"reason\":\"...\"}"
     )
     payload, content, messages = invoke_json_agent(
         state,
@@ -1073,20 +1155,22 @@ def intent_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         agent,
         agent_name,
         "intent",
-        {"route": rule_route, "reason": "rule"},
+        {"route": "direct", "reason": "rule"},
     )
-    route = str(payload.get("route", rule_route)).strip().lower()
+    route = str(payload.get("route", "direct")).strip().lower()
     if route not in {"direct", "multiagent"}:
-        route = rule_route
-    logger.info("%s 路由: %s", colorize("[intent]", "green"), route)
+        route = "direct"
+    logger.info("%s ??: %s", colorize("[intent]", "green"), route)
     return {"intent": route, "draft": content, "messages": messages}
 
 
 def direct_answer_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     logger.info("%s 开始 | agent=%s", colorize("[direct_answer]", "cyan"), colorize(agent_name, "magenta"))
-    prompt = f"用户问题：{state['query']}"
+    now = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S (星期%w)")
+    prompt = f"当前时间：{now}\n用户问题：{state['query']}"
     human = HumanMessage(content=with_memory_context(state, prompt))
-    result = agent.invoke({"messages": [human]})
+    # Include conversation history so multi-turn context is preserved
+    result = agent.invoke({"messages": state["messages"] + [human]})
     content = _last_content(result).strip()
     emit("direct_answer", content)
     return {
@@ -1102,10 +1186,32 @@ def direct_answer_node(state: ResearchState, agent, agent_name: str) -> Research
 def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     logger.info("%s 开始 | agent=%s", colorize("[plan]", "cyan"), colorize(agent_name, "magenta"))
     log_inputs("plan", agent_name, {"query": state["query"]})
+    
+    # Fast path: simple queries use default plan (skip LLM)
+    query = state["query"]
+    simple_indicators = ["???", "???", "??", "????", "????", "??"]
+    is_simple = any(w in query for w in simple_indicators) and len(query) < 40
+    if is_simple:
+        logger.info("%s ????: ?????? LLM ??", colorize("[plan]", "green"))
+        fb = _default_plan(state)
+        sp = _derive_search_plan(fb["outline"], fb["sub_questions"], fb["research_questions"], query)
+        return {
+            "phase": "planning completed (fast)",
+            "plan": query,
+            "outline": fb["outline"],
+            "sub_questions": fb["sub_questions"],
+            "research_questions": fb["research_questions"],
+            "search_plan": sp,
+            "budget": fb["budget"],
+            "messages": [],
+            "draft": "",
+            "iteration": 0,
+        }
+    
     fallback = _default_plan(state)
     payload, content, messages = invoke_json_agent(
         state,
-        f"用户需求：{state['query']}\n请先做大纲与问题拆解，再输出规划 JSON。",
+        f"?????{query}\n???????????????? JSON?",
         agent,
         agent_name,
         "plan",
@@ -1132,93 +1238,125 @@ def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
 
 
 def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
-    logger.info("%s 开始 | agent=%s", colorize("[web_search]", "cyan"), colorize(agent_name, "magenta"))
+    """Enterprise-grade web search: parallel queries, multi-backend, cache, fetch, rewrite, rerank."""
+    logger.info("%s ?? | agent=%s", colorize("[web_search]", "cyan"), colorize(agent_name, "magenta"))
     queries = _build_queries(state, "web")
-    logger.info("[web_search_node] 构建查询 | 查询数量=%s | queries=%s", len(queries), [q.get("query", "") for q in queries])
-    
-    raw_records = []
-    query_traces = state.get("web_search_trace", [])
-    
+    logger.info("[web_search_node] ???? | ????=%s | queries=%s",
+                len(queries), [q.get("query", "") for q in queries])
+
     iteration = state.get("iteration", 0)
     prefix = f"WEB{iteration+1}"
-    logger.info("[web_search_node] 迭代信息 | iteration=%s | prefix=%s", iteration, prefix)
-    
-    for query_index, item in enumerate(queries, 1):
-        query_text = str(item.get("query", ""))
-        logger.info("[web_search_node] 执行第 %s/%s 个查询 | query=%s | section_id=%s", query_index, len(queries), query_text, item.get("section_id"))
-        # 优化点：减少单词请求返回的数量，从 count=6 降至 count=4，大幅减少无用 Token 消耗
-        records = bocha_web_search_records(query_text, count=4)
-        logger.info("[web_search_node] 查询 %s 返回 | 记录数=%s", query_index, len(records))
-        records = _assign_source_ids(records, f"{prefix}_{query_index}")
-        for record in records:
-            record["section_id"] = item.get("section_id")
-            record["search_query"] = item.get("query")
-        raw_records.extend(records)
-        query_traces.append(
-            {
-                "iteration": iteration,
-                "plan_step": query_index,
-                "query": str(item.get("query", "")),
-                "section_id": item.get("section_id"),
-                "reason": item.get("reason", ""),
-                "source_preference": item.get("source_preference", "web"),
-                "raw_count": len(records),
-                "raw_records": _summarize_records(records),
-            }
-        )
-    raw_records = _dedupe_sources(raw_records, ["url", "title"])
-    raw_records = _minimal_record_filter(raw_records, ["title", "snippet", "url"])
-    logger.info("[web_search_node] 数据清洗后 | 去重过滤后记录数=%s", len(raw_records))
-    
+    query_traces = state.get("web_search_trace", [])
+
+    # ?? Extract query texts ??
+    query_texts = [str(item.get("query", "")) for item in queries if str(item.get("query", "")).strip()]
+    if not query_texts:
+        query_texts = [state["query"]]
+
+    # ?? Parallel search with enterprise engine ??
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+    from .search import search as enterprise_search
+
+    all_raw_records: list[dict] = []
+    query_index_map: dict[str, int] = {}
+    for idx, item in enumerate(queries, 1):
+        qtext = str(item.get("query", ""))
+        if qtext:
+            query_index_map[qtext] = idx
+
+    search_timeout = 45.0
+    with ThreadPoolExecutor(max_workers=min(len(query_texts), 6)) as executor:
+        futures = {}
+        for qtext in query_texts:
+            futures[executor.submit(
+                enterprise_search, qtext,
+                enable_cache=True, enable_rewrite=True,
+                enable_fetch=True, enable_rerank=True
+            )] = qtext
+
+        try:
+            for future in as_completed(futures, timeout=search_timeout):
+                qtext = futures[future]
+                query_idx = query_index_map.get(qtext, 1)
+                try:
+                    records = future.result()
+                except Exception as exc:
+                    logger.warning("[web_search_node] search failed for query=%s: %s", qtext[:60], exc)
+                    records = []
+
+                # Assign source_ids
+                records = _assign_source_ids(records, f"{prefix}_{query_idx}")
+                for record in records:
+                    record["section_id"] = query_idx
+                    record["search_query"] = qtext
+
+                logger.info("[web_search_node] ???? | query=%s | results=%s", qtext[:60], len(records))
+                query_traces.append({
+                    "iteration": iteration,
+                    "plan_step": query_idx,
+                    "query": qtext,
+                    "section_id": query_idx,
+                    "source_preference": "web",
+                    "raw_count": len(records),
+                    "raw_records": _summarize_records(records),
+                })
+                all_raw_records.extend(records)
+        except TimeoutError:
+            logger.warning("[web_search_node] ?????? (%.1fs)???????", search_timeout)
+
+    # ?? Deduplicate and filter ??
+    all_raw_records = _dedupe_sources(all_raw_records, ["url", "title"])
+    all_raw_records = _minimal_record_filter(all_raw_records, ["title", "snippet", "url"])
+
+    # ?? Programmatic pre-filter before LLM ??
+    for qtext in query_texts:
+        all_raw_records, _ = _filter_web_records(qtext, all_raw_records)
+
+    logger.info("[web_search_node] ????? | ????????=%s", len(all_raw_records))
+
     web_retrieval_stats = state.get("web_retrieval_stats", {})
-    web_retrieval_stats["query_count"] = web_retrieval_stats.get("query_count", 0) + len(queries)
-    web_retrieval_stats["raw_count"] = web_retrieval_stats.get("raw_count", 0) + len(raw_records)
-    
-    log_inputs("web_search", agent_name, {"query_count": str(len(queries)), "raw_count": str(len(raw_records))})
-    if not raw_records:
-        logger.warning("[web_search_node] 无可用网页证据，跳过网页上下文注入 | 查询数=%s", len(queries))
-        logger.info("%s 无可用网页证据，跳过网页上下文注入", colorize("[web_search]", "yellow"))
+    web_retrieval_stats["query_count"] = web_retrieval_stats.get("query_count", 0) + len(query_texts)
+    web_retrieval_stats["raw_count"] = web_retrieval_stats.get("raw_count", 0) + len(all_raw_records)
+
+    log_inputs("web_search", agent_name, {"query_count": str(len(query_texts)), "raw_count": str(len(all_raw_records))})
+
+    if not all_raw_records:
+        logger.info("%s ?????????????????", colorize("[web_search]", "yellow"))
         return {
-            "web_search": "未检索到可用网页证据，已跳过网页上下文注入。",
+            "web_search": "??????????????????????",
             "web_evidence": state.get("web_evidence", []),
             "web_retrieval_stats": web_retrieval_stats,
             "web_search_trace": query_traces,
         }
-    logger.info("[web_search_node] 调用 LLM 整理证据 | raw_records=%s", len(raw_records))
-    fallback = _fallback_web_evidence(raw_records)
-    payload, content, messages = invoke_json_agent(
-        state,
-        "请基于以下网页证据整理结构化 JSON。\n"
-        f"原问题：{state['query']}\n"
-        f"子问题：{json.dumps(state.get('sub_questions', []), ensure_ascii=False)}\n"
-        f"原始网页证据：\n{_format_raw_records(raw_records, 'web')}",
-        agent,
-        agent_name,
-        "web_search",
-        fallback,
-    )
-    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else fallback["evidence"]
-    logger.info("[web_search_node] LLM 返回证据 | evidence数量=%s", len(evidence))
-    allowed_source_ids = {str(item.get("source_id")) for item in raw_records if item.get("source_id")}
+
+    # ?? Programmatic evidence construction (skip redundant LLM filtering) ??
+    # enterprise_search already did rewrite + multi-backend + rerank.
+    # We construct evidence directly without an extra LLM round-trip.
+    logger.info("[web_search_node] ?????????? LLM ???| raw_records=%s", len(all_raw_records))
+    evidence = _fallback_web_evidence(all_raw_records)["evidence"]
+    content = "???????"
+    messages = []
+
+    # ?? Safety: prune to allowed source_ids, enrich missing fields ??
+    allowed_source_ids = {str(item.get("source_id")) for item in all_raw_records if item.get("source_id")}
     evidence = _prune_evidence_to_allowed_sources(evidence, allowed_source_ids)
-    # 从原始记录补充 LLM 可能丢失的 url/domain/title 字段
-    evidence = _enrich_evidence_from_raw(evidence, raw_records)
-    
+    evidence = _enrich_evidence_from_raw(evidence, all_raw_records)
+
     web_retrieval_stats["kept_count"] = web_retrieval_stats.get("kept_count", 0) + len(evidence)
-    web_retrieval_stats["dropped_count"] = web_retrieval_stats.get("dropped_count", 0) + max(len(raw_records) - len(evidence), 0)
-    
+    web_retrieval_stats["dropped_count"] = web_retrieval_stats.get("dropped_count", 0) + max(len(all_raw_records) - len(evidence), 0)
+
     kept_ids = {str(item.get("source_id")) for item in evidence if item.get("source_id")}
     query_traces = _finalize_query_traces(
-        query_traces,
-        kept_ids,
-        payload.get("rejected_source_ids", []),
-        str(payload.get("reject_reason", "")).strip(),
+        query_traces, kept_ids,
+        [],  # programmatic filtering (no payload)
+        "",  # programmatic filtering
     )
-    
+
     existing_evidence = state.get("web_evidence", [])
-    logger.info("[web_search_node] 节点完成 | 新增证据=%s | 累计证据=%s", len(evidence), len(existing_evidence) + len(evidence))
+    logger.info("[web_search_node] ???? | ????=%s | ????=%s",
+                len(evidence), len(existing_evidence) + len(evidence))
     return {
-        "web_search": payload.get("summary", content),
+        "web_search": content,
         "web_evidence": existing_evidence + evidence,
         "web_retrieval_stats": web_retrieval_stats,
         "web_search_trace": query_traces,
@@ -1270,21 +1408,14 @@ def local_rag_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
             "local_retrieval_stats": local_retrieval_stats,
             "local_rag_trace": query_traces,
         }
-    fallback = _fallback_local_evidence(raw_records)
-    payload, content, messages = invoke_json_agent(
-        state,
-        "请基于以下知识库证据整理结构化 JSON。\n"
-        f"原问题：{state['query']}\n"
-        f"子问题：{json.dumps(state.get('sub_questions', []), ensure_ascii=False)}\n"
-        f"原始知识库证据：\n{_format_raw_records(raw_records, 'local')}",
-        agent,
-        agent_name,
-        "local_rag",
-        fallback,
-    )
-    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else fallback["evidence"]
+    # Programmatic evidence construction (skip LLM filtering - same as web_search_node)
+    logger.info("[local_rag_node] ????????? (?? LLM) | raw_records=%s", len(raw_records))
+    evidence = _fallback_local_evidence(raw_records)["evidence"]
     allowed_source_ids = {str(item.get("source_id")) for item in raw_records if item.get("source_id")}
     evidence = _prune_evidence_to_allowed_sources(evidence, allowed_source_ids)
+    evidence = _enrich_evidence_from_raw(evidence, raw_records)
+    content = "???????"
+    messages = []
     
     local_retrieval_stats["kept_count"] = local_retrieval_stats.get("kept_count", 0) + len(evidence)
     local_retrieval_stats["dropped_count"] = local_retrieval_stats.get("dropped_count", 0) + max(len(raw_records) - len(evidence), 0)
@@ -1293,13 +1424,13 @@ def local_rag_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
     query_traces = _finalize_query_traces(
         query_traces,
         kept_ids,
-        payload.get("rejected_source_ids", []),
-        str(payload.get("reject_reason", "")).strip(),
+        [],  # programmatic filtering (no payload)
+        "",  # programmatic filtering
     )
     
     existing_evidence = state.get("local_evidence", [])
     return {
-        "local_rag": payload.get("summary", content),
+        "local_rag": content,  # programmatic filtering
         "local_evidence": existing_evidence + evidence,
         "local_retrieval_stats": local_retrieval_stats,
         "local_rag_trace": query_traces,
@@ -1312,6 +1443,19 @@ def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
     if not state.get("web_evidence") and not state.get("local_evidence"):
         logger.info("%s 等待检索结果", colorize("[deep_dive]", "yellow"))
         return {}
+    # Fast path: when total evidence <= 6 items, skip LLM and use programmatic audit
+    total_evidence = len(state.get("web_evidence", [])) + len(state.get("local_evidence", []))
+    if total_evidence <= 6:
+        logger.info("%s ?????????(%d?)??? LLM ??", colorize("[deep_dive]", "green"), total_evidence)
+        fb = _fallback_audit(state)
+        return {
+            "deep_dive": fb["summary"],
+            "audit": fb["summary"],
+            "evidence_pool": fb["evidence_pool"],
+            "audit_flags": fb["audit_flags"],
+            "source_index": fb["source_index"],
+            "messages": [],
+        }
     fallback = _fallback_audit(state)
     payload, content, messages = invoke_json_agent(
         state,
@@ -1492,3 +1636,58 @@ def write_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     final_content = _ensure_reference_section(content, state)
     emit("write", final_content)
     return {"draft": final_content, "final": final_content, "messages": [human, result["messages"][-1]]}
+
+
+def memory_reflect_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
+    """Memory reflection node: analyze what was learned and extract patterns.
+
+    Runs after the final report is generated. Extracts facts and procedural
+    patterns from the completed research task for future reuse.
+    """
+    logger.info("%s starting | agent=%s", colorize("[memory_reflect]", "cyan"), colorize(agent_name, "magenta"))
+
+    query = state.get("query", "")
+    final_report = state.get("final", "")
+
+    if not final_report:
+        logger.info("%s skipping - no final output", colorize("[memory_reflect]", "yellow"))
+        return {"memory_reflect_done": True}
+
+    # Use the MemoryManager if available
+    try:
+        from .main import MEMORY_MANAGER
+        if MEMORY_MANAGER:
+            # Extract facts from the final report content
+            extracted = MEMORY_MANAGER._extractor.extract_from_turn(
+                query=query,
+                answer=final_report[:3000],
+            )
+            facts = extracted.get("facts", [])
+            patterns = extracted.get("procedural", [])
+
+            # Learn procedural patterns from this successful task
+            for pat in patterns:
+                MEMORY_MANAGER.procedural.learn_pattern(
+                    user_id=state.get("user_id", "default_user"),
+                    trigger=pat.get("trigger", f"Research task: {query[:80]}"),
+                    action=pat.get("action", "Research completed successfully"),
+                    context=query[:200],
+                    importance=0.6,
+                    thread_id=state.get("tenant_id", "default"),
+                )
+
+            logger.info(
+                "%s extracted facts=%d patterns=%d",
+                colorize("[memory_reflect]", "green"),
+                len(facts),
+                len(patterns),
+            )
+            return {
+                "memory_reflect_done": True,
+                "extracted_facts": facts,
+                "extracted_patterns": patterns,
+            }
+    except Exception as exc:
+        logger.warning("%s failed (non-critical): %s", colorize("[memory_reflect]", "yellow"), exc)
+
+    return {"memory_reflect_done": True}

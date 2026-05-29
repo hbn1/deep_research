@@ -1,4 +1,4 @@
-"""状态定义模块：声明多智能体工作流共享的 ResearchState 结构。"""
+"""State definitions for the multi-agent research workflow."""
 
 import operator
 from typing import Annotated, List
@@ -44,6 +44,10 @@ class ResearchState(TypedDict):
     final: str
     iteration: int
     max_iterations: int
+    # Memory reflection
+    memory_reflect_done: bool
+    extracted_facts: list[str]
+    extracted_patterns: list[dict]
 
 
 def create_initial_state(
@@ -91,4 +95,7 @@ def create_initial_state(
         "final": "",
         "iteration": 0,
         "max_iterations": max_iterations,
+        "memory_reflect_done": False,
+        "extracted_facts": [],
+        "extracted_patterns": [],
     }

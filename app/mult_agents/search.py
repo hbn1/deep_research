@@ -1,4 +1,4 @@
-﻿"""
+"""
 企业级搜索引擎模块 — 多后端、缓存、并行、重排序、全量抓取、时间范围、Query 改写
 """
 from __future__ import annotations
@@ -433,6 +433,44 @@ def _serper_search(query: str, api_key: str, count: int, _freshness: str, timeou
     return records
 
 
+def _tavily_search(query: str, api_key: str, count: int, _freshness: str, timeout: float) -> list[dict]:
+    """Tavily Search API"""
+    if not api_key or not _HAS_HTTPX:
+        return []
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": count,
+                    "include_answer": False,
+                },
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            if resp.status_code != 200:
+                logger.warning("[tavily] search failed: HTTP %s", resp.status_code)
+                return []
+            data = resp.json()
+    except Exception as e:
+        logger.warning("[tavily] search failed: %s", e)
+        return []
+
+    records = []
+    for idx, item in enumerate(data.get("results", [])[:count], 1):
+        url = str(item.get("url") or "").strip()
+        records.append({
+            "source_id": f"WEB-{idx}",
+            "title": item.get("title", ""),
+            "url": url,
+            "snippet": item.get("content", ""),
+            "domain": _extract_domain(url),
+            "source_type": "web",
+            "backend": "tavily",
+        })
+    return records
+
 # ── 统一搜索入口 ──────────────────────────────────────────
 
 # 全局实例
@@ -456,14 +494,20 @@ def _search_single_backend(
     backends: dict[str, Callable[..., list[dict]]] = {
         "bocha": _bocha_search,
         "serper": _serper_search,
+        "tavily": _tavily_search,
     }
     api_keys = {
         "bocha": config.bocha_api_key,
         "serper": config.serper_api_key,
+        "tavily": config.tavily_api_key,
     }
     func = backends.get(backend)
     api_key = api_keys.get(backend, "")
-    if func is None or not api_key:
+    if func is None:
+        logger.warning("[search] backend=%s not implemented, skipping", backend)
+        return []
+    if not api_key:
+        logger.info("[search] backend=%s skipped (no API key configured)", backend)
         return []
     logger.info("[search] backend=%s | query=%s | freshness=%s", backend, query[:60], freshness)
     results = func(query, api_key, config.default_count, freshness, config.request_timeout)

@@ -1,4 +1,4 @@
-"""运行主入口：构建 Agent、初始化记忆与 checkpointer，并驱动工作流执行。"""
+﻿"""运行主入口：构建 Agent、初始化记忆与 checkpointer，并驱动工作流执行。"""
 import argparse
 import json
 import importlib
@@ -25,8 +25,10 @@ from .nodes import (
     web_search_node, local_rag_node, deep_dive_node,
     analyze_node, reflect_node, write_node,
 )
+from .state import ResearchState, create_initial_state
+from .prompts import PROMPTS
 from .utils import colorize, emit, collect_tool_calls, with_memory_context, log_inputs
-from .memory import MemoryManager
+from .memory import MemoryManager, ProceduralMemoryStore, MemoryExtractor
 from .tools import (
     extract_requirements,
     outline_from_topics,
@@ -73,7 +75,7 @@ def build_memory_manager(config: AppConfig) -> Optional[MemoryManager]:
     if not config.enable_memory:
         return None
     try:
-        return MemoryManager(
+        manager = MemoryManager(
             short_term_ttl=config.short_term_ttl_seconds,
             short_term_max_messages=config.short_term_max_messages,
             short_term_summary_threshold=config.short_term_summary_threshold,
@@ -89,6 +91,7 @@ def build_memory_manager(config: AppConfig) -> Optional[MemoryManager]:
             milvus_port=config.milvus_port,
             milvus_collection=config.milvus_collection,
             embedding_api_key=config.api_key,
+            summary_model=config.summary_model,
         )
     except Exception as exc:
         logger.exception("初始化 MemoryManager 失败，已禁用外部记忆: %s", exc)
@@ -122,7 +125,11 @@ def build_checkpointer(config: AppConfig):
                 logger.info("%s %s", colorize("[memory]", "cyan"), message)
         else:
             try:
-                CHECKPOINTER_CONTEXT = postgres_saver.from_conn_string(config.postgres_dsn)
+                dsn = config.postgres_dsn
+                if "connect_timeout" not in dsn:
+                    sep = chr(38) if "?" in dsn else "?"
+                    dsn = f"{dsn}{sep}connect_timeout=5"
+                CHECKPOINTER_CONTEXT = postgres_saver.from_conn_string(dsn)
                 checkpointer = CHECKPOINTER_CONTEXT.__enter__()
                 checkpointer.setup()
                 logger.info("%s 使用 PostgreSQL checkpointer", colorize("[memory]", "green"))
@@ -249,18 +256,39 @@ def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
         search_rewrite_enabled=config.search_rewrite_enabled,
         search_fetch_enabled=config.search_fetch_enabled,
     )
-    # 去掉每个 Agent 强制绑定的 tools，只做信息抽取，降低 System Prompt 长度
+    # ── 模型路由：direct / 轻量节点用小模型，multi-agent 核心节点用大模型 ──
+    import ast
+    small_model = config.small_model or "qwen-turbo"
+    overrides_raw = config.node_model_overrides
+    node_overrides = {}
+    if overrides_raw and overrides_raw.strip():
+        try:
+            node_overrides = ast.literal_eval(overrides_raw)
+        except Exception:
+            try:
+                node_overrides = json.loads(overrides_raw)
+            except Exception:
+                logger.warning("Failed to parse node_model_overrides: %s", overrides_raw)
+    # 默认路由：direct_responder / intent_router → small_model，其余 → model
+    default_small_nodes = {"direct_responder", "intent_router"}
+    def _agent_model(node_name: str) -> str:
+        if node_name in node_overrides:
+            return node_overrides[node_name]
+        if node_name in default_small_nodes:
+            return small_model
+        return model
     return AgentBundle(
-        intent_router=build_agent(model, api_key, "intent_router", 0.0, []),
-        planner=build_agent(model, api_key, "plan", 0.3, []),
-        scout_web=build_agent(model, api_key, "web_search", 0.4, []),
-        scout_local=build_agent(model, api_key, "local_rag", 0.4, []),
-        evidence_judge=build_agent(model, api_key, "deep_dive", 0.2, []),
-        analyst=build_agent(model, api_key, "analyze", 0.3, []),
-        direct_responder=build_agent(model, api_key, "direct_answer", 0.2, []),
-        writer=build_agent(model, api_key, "write", 0.4, []),
-    )
+        intent_router=build_agent(_agent_model("intent_router"), api_key, "intent_router", 0.0, []),
+        planner=build_agent(_agent_model("planner"), api_key, "plan", 0.3, []),
+        scout_web=build_agent(_agent_model("scout_web"), api_key, "web_search", 0.4, []),
+        scout_local=build_agent(_agent_model("scout_local"), api_key, "local_rag", 0.4, []),
+        evidence_judge=build_agent(_agent_model("evidence_judge"), api_key, "deep_dive", 0.2, []),
+        analyst=build_agent(_agent_model("analyst"), api_key, "analyze", 0.3, []),
+        direct_responder=build_agent(_agent_model("direct_responder"), api_key, "direct_answer", 0.2, []),
+        writer=build_agent(_agent_model("writer"), api_key, "write", 0.4, []),
 
+
+    )
 def run_query(app, config: AppConfig, query: str):
     memory_context = ""
     if MEMORY_MANAGER:
@@ -295,6 +323,8 @@ def run_query(app, config: AppConfig, query: str):
                 query=query,
                 answer=final,
             )
+        except Exception as exc:
+            logger.warning("%s persist failed: %s", colorize("[memory]", "yellow"), exc)
         except Exception as exc:
             logger.warning("%s 持久化记忆失败，已跳过: %s", colorize("[memory]", "yellow"), exc)
     return final
@@ -340,6 +370,10 @@ def main():
                 break
             if query.lower() in {"/memory", "memory-status"} and MEMORY_MANAGER:
                 print(json.dumps(MEMORY_MANAGER.get_memory_stats(config.user_id), ensure_ascii=False, indent=2))
+                continue
+            if query.lower() in {"/memory-vacuum", "memory-vacuum"} and MEMORY_MANAGER:
+                result = MEMORY_MANAGER.vacuum(user_id=config.user_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
                 continue
             if query.lower() in {"/memory-trace", "memory-trace"} and MEMORY_MANAGER:
                 print(json.dumps(MEMORY_MANAGER.get_last_trace(), ensure_ascii=False, indent=2))

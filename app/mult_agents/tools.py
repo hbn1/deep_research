@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from typing import Optional
 from .rag.core import RAGSystem, RAGConfig, RAGManager
 from .search import (
+    search as enterprise_search,
     SearchConfig,
     init_search,
     search as enterprise_search,

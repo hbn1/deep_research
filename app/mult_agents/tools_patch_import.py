@@ -1,4 +1,4 @@
-﻿from .search import (
+from .search import (
     SearchConfig,
     SearchCache,
     init_search,
