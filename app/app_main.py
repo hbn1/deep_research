@@ -5,6 +5,8 @@ import uvicorn
 
 from backend.config import AppSettings
 from backend.router import health_router, research_router
+from backend.middleware.auth import ApiKeyAuthMiddleware
+from backend.middleware.rate_limit import SlidingWindowRateLimiter
 
 
 logging.basicConfig(
@@ -18,6 +20,13 @@ logging.getLogger("backend").setLevel(logging.INFO)
 def create_app() -> FastAPI:
     settings = AppSettings()
     app = FastAPI(title=settings.app_name)
+
+    # 速率限制 (窗口60s / 30请求，排除健康检查等路径)
+    app.add_middleware(SlidingWindowRateLimiter, window_seconds=60, max_requests=30)
+
+    # API Key 鉴权
+    app.add_middleware(ApiKeyAuthMiddleware)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins(),

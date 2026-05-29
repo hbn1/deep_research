@@ -1,9 +1,9 @@
-"""Workflow orchestration: LangGraph nodes, conditional routing, and execution path."""
+﻿"""Workflow orchestration: LangGraph nodes, conditional routing, and execution path."""
 import logging
+from functools import partial
 from langgraph.graph import StateGraph, START, END
 
 from .nodes import (
-    bind_agent,
     intent_node,
     direct_answer_node,
     plan_node,
@@ -15,6 +15,7 @@ from .nodes import (
     write_node,
     memory_reflect_node,
 )
+from .utils import bind_agent
 from .state import ResearchState
 
 
@@ -47,8 +48,19 @@ def route_after_write(state: ResearchState) -> str:
     return "end"
 
 
-def build_app(agents, checkpointer):
+def build_app(agents, checkpointer, memory_manager=None):
+    """Build the compiled LangGraph workflow.
+
+    Args:
+        agents: AgentBundle with pre-built LLM agents.
+        checkpointer: LangGraph checkpointer instance.
+        memory_manager: Optional MemoryManager for the memory_reflect node.
+    """
     workflow = StateGraph(ResearchState)
+
+    # Bind memory_manager into the memory_reflect node via partial
+    _memory_reflect = partial(memory_reflect_node, memory_manager=memory_manager)
+
     workflow.add_node("intent", bind_agent(intent_node, agents.intent_router, "intent_router"))
     workflow.add_node("direct_answer", bind_agent(direct_answer_node, agents.direct_responder, "direct_responder"))
     workflow.add_node("plan", bind_agent(plan_node, agents.planner, "planner"))
@@ -58,7 +70,7 @@ def build_app(agents, checkpointer):
     workflow.add_node("analyze", bind_agent(analyze_node, agents.analyst, "analyst"))
     workflow.add_node("reflect", bind_agent(reflect_node, agents.planner, "planner"))
     workflow.add_node("write", bind_agent(write_node, agents.writer, "writer"))
-    workflow.add_node("memory_reflect", bind_agent(memory_reflect_node, agents.writer, "memory_reflect"))
+    workflow.add_node("memory_reflect", bind_agent(_memory_reflect, agents.writer, "memory_reflect"))
 
     workflow.add_edge(START, "intent")
     workflow.add_conditional_edges(
@@ -88,7 +100,6 @@ def build_app(agents, checkpointer):
     workflow.add_edge("reflect", "local_rag")
     workflow.add_edge("direct_answer", END)
 
-    # After write, optionally run memory_reflect before ending
     workflow.add_conditional_edges(
         "write",
         route_after_write,

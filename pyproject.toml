@@ -1,25 +1,26 @@
-[project]
+﻿[project]
 name = "mult_agents"
 version = "0.1.0"
-description = "Multi-agent LangGraph pipeline with Qwen"
+description = "Multi-agent LangGraph pipeline for deep research"
 requires-python = ">=3.10"
 dependencies = [
-  "langgraph",
-  "langgraph-checkpoint-redis",
+  "langgraph>=1.0",
   "langgraph-checkpoint-postgres",
-  "fastapi",
-  "uvicorn[standard]",
-  "langchain",
+  "langchain>=1.0",
   "langchain-community",
   "langchain-core",
   "langchain-milvus",
+  "fastapi>=0.100",
+  "uvicorn[standard]",
   "dashscope",
   "pymilvus",
   "psycopg[binary,pool]",
   "redis",
   "python-dotenv",
   "pydantic-settings",
-  "typing-extensions"
+  "typing-extensions",
+  "httpx",
+  "sse-starlette",
 ]
 
 [build-system]

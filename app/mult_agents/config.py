@@ -1,4 +1,4 @@
-﻿"""配置模块：统一加载 .env 与 config.json，并构建全局 AppConfig。"""
+"""配置模块：统一加载 .env 与 config.json，并构建全局 AppConfig。"""
 
 import json
 import os

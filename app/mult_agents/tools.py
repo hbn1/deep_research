@@ -1,33 +1,32 @@
-"""??????? Web ????? RAG ????????????"""
+﻿"""Multi-agent tools: Web search, RAG retrieval, utilities.
+
+Only tools with real implementations are kept. Stub/placeholder tools
+that return hardcoded strings have been removed.
+"""
 
 from datetime import datetime
-import ast
 import json
 import logging
-import operator
 import os
-from pathlib import Path
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from langchain_core.tools import tool
-from typing import Optional
-from .rag.core import RAGSystem, RAGConfig, RAGManager
+
+from .rag.core import RAGManager
 from .search import (
-    search as enterprise_search,
     SearchConfig,
     init_search,
-    search as enterprise_search,
 )
 
 _search_initialized = False
-
-
 logger = logging.getLogger("mult_agents")
 
+# -- RAG init --
 
-# RAG: use RAGManager (thread-safe, multi-tenant)
 _rag_tenant_id: str = "default_tenant"
+
 
 def init_rag_system(api_key: str, config=None, tenant_id="default_tenant"):
     """Initialize RAG via RAGManager."""
@@ -38,11 +37,13 @@ def init_rag_system(api_key: str, config=None, tenant_id="default_tenant"):
     except Exception as e:
         print(f"RAG init failed: {e}")
 
+
 def _get_rag():
     """Get current RAG instance from RAGManager."""
     return RAGManager.get_or_none(tenant_id=_rag_tenant_id)
 
 
+# -- Search init --
 
 def init_search_from_config(
     api_key: str = "",
@@ -63,9 +64,8 @@ def init_search_from_config(
     global _search_initialized
     if _search_initialized:
         return
-    import os as _os
     config = SearchConfig(
-        bocha_api_key=_os.getenv("BOCHA_API_KEY", "").strip(),
+        bocha_api_key=os.getenv("BOCHA_API_KEY", "").strip(),
         serper_api_key=serper_api_key,
         tavily_api_key=tavily_api_key,
         enabled_backends=[b.strip() for b in search_backends.split(",") if b.strip()],
@@ -79,9 +79,11 @@ def init_search_from_config(
         rewrite_enabled=search_rewrite_enabled,
         rewrite_model="qwen-turbo",
     )
-    init_search(config)
+    init_search(config, redis_url=os.getenv("REDIS_URL", "").strip())
     _search_initialized = True
 
+
+# -- Core search --
 
 def search_knowledge_base_records(query: str, limit: int = 5) -> list[dict]:
     """Search local knowledge base with full RAG pipeline (hybrid+rerank)."""
@@ -95,11 +97,10 @@ def search_knowledge_base_records(query: str, limit: int = 5) -> list[dict]:
 
 
 def bocha_web_search_records(query: str, count: int = 8) -> list[dict]:
+    """Call Bocha Web Search API directly."""
     api_key = os.getenv("BOCHA_API_KEY", "").strip()
-    logger.info("[bocha_web_search] ???? | query=%s | count=%s", query, count)
-    logger.info("[bocha_web_search] API Key ?? | ????=%s | Key??=%s", bool(api_key), api_key[:8] + "..." if api_key else "None")
     if not api_key:
-        logger.warning("[bocha_web_search] ??? BOCHA_API_KEY?????")
+        logger.warning("[bocha_web_search] BOCHA_API_KEY not configured")
         return []
     payload = {
         "query": query,
@@ -117,147 +118,88 @@ def bocha_web_search_records(query: str, count: int = 8) -> list[dict]:
         },
     )
     try:
-        logger.info("[bocha_web_search] ???? | url=%s", request.full_url)
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8")
-            logger.info("[bocha_web_search] ???? | status=%s | content_length=%s", response.status, len(raw))
         result = json.loads(raw)
-        logger.info("[bocha_web_search] ?????? | data????=%s", "data" in result)
     except urllib.error.HTTPError as e:
-        logger.error("[bocha_web_search] HTTP ?? | code=%s | reason=%s", e.code, e.reason)
+        logger.error("[bocha_web_search] HTTP %s: %s", e.code, e.reason)
         return []
     except urllib.error.URLError as e:
-        logger.error("[bocha_web_search] URL ?? | reason=%s", e.reason)
+        logger.error("[bocha_web_search] URL error: %s", e.reason)
         return []
-    except json.JSONDecodeError as e:
-        logger.error("[bocha_web_search] JSON ???? | error=%s", e)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.error("[bocha_web_search] error: %s", e)
         return []
-    except Exception as e:
-        logger.error("[bocha_web_search] ???? | error=%s | type=%s", e, type(e).__name__)
-        return []
+
     data = result.get("data", {})
     pages = data.get("webPages", [])
-    logger.info("[bocha_web_search] ???? | webPages??=%s", type(pages).__name__)
     if isinstance(pages, dict):
-        if isinstance(pages.get("value"), list):
-            pages = pages.get("value", [])
-        elif isinstance(pages.get("items"), list):
-            pages = pages.get("items", [])
-        else:
-            pages = []
+        pages = pages.get("value", []) or []
     if not isinstance(pages, list):
-        logger.warning("[bocha_web_search] webPages ???? | type=%s", type(pages).__name__)
         return []
-    logger.info("[bocha_web_search] ?????? | total=%s", len(pages))
-    records: list[dict] = []
-    for idx, page in enumerate(pages[:count], 1):
-        if not isinstance(page, dict):
-            logger.warning("[bocha_web_search] ? %s ??????? | type=%s", idx, type(page).__name__)
+
+    records = []
+    for item in pages:
+        if not isinstance(item, dict):
             continue
-        url = str(page.get("url") or "").strip()
-        domain = ""
-        if "://" in url:
-            domain = url.split("://", 1)[1].split("/", 1)[0]
-        title = page.get("name") or f"web_result_{idx}"
-        snippet = page.get("summary") or ""
-        logger.info("[bocha_web_search] ???? %s | title=%s | url=%s | snippet??=%s", idx, title[:50], domain, len(snippet))
-        records.append(
-            {
-                "source_id": f"WEB-{idx}",
-                "title": title,
-                "url": url,
-                "snippet": snippet,
-                "domain": domain,
-                "source_type": "web",
-                "published_at": page.get("datePublished") or page.get("dateLastCrawled") or "",
-            }
-        )
-    logger.info("[bocha_web_search] ???? | ?????=%s", len(records))
-    return records
+        url = item.get("url", "") or item.get("displayUrl", "")
+        records.append({
+            "title": item.get("name", "") or item.get("title", ""),
+            "url": url,
+            "domain": url.split("://")[-1].split("/")[0] if url else "",
+            "snippet": item.get("snippet", "") or item.get("summary", ""),
+            "source_type": "web",
+            "published_at": item.get("dateLastCrawled", ""),
+        })
 
-@tool
-def search_knowledge_base(query: str) -> str:
-    """
-    Search local/enterprise knowledge base.
-    Returns formatted retrieval results with source attribution.
-    """
-    rag = _get_rag()
-    if rag is None:
-        return "RAG system not available. Please ensure Milvus is running."
-    return rag.search(query)
+    return records[:count]
 
 
-ALLOWED_OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-    ast.Mod: operator.mod,
-}
-
-
-def _eval_node(node):
-    if isinstance(node, ast.Num):
-        return node.n
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in ALLOWED_OPERATORS:
-        left = _eval_node(node.left)
-        right = _eval_node(node.right)
-        return ALLOWED_OPERATORS[type(node.op)](left, right)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        value = _eval_node(node.operand)
-        return value if isinstance(node.op, ast.UAdd) else -value
-    raise ValueError("Unsupported expression")
-
+# -- Tools --
 
 @tool
 def get_current_time() -> str:
-    """??????? ISO ????"""
+    """Return current datetime as ISO-8601 string."""
     return datetime.now().isoformat()
 
 
 @tool
 def simple_calculator(expression: str) -> str:
-    """???????????????"""
-    tree = ast.parse(expression, mode="eval")
-    result = _eval_node(tree.body)
-    return str(result)
+    """Evaluate a simple math expression safely."""
+    allowed = set("0123456789+-*/().%^ ")
+    if not all(c in allowed for c in expression):
+        return "Error: expression contains disallowed characters"
+    try:
+        expr = expression.replace("^", "**")
+        result = eval(expr, {"__builtins__": {}}, {})
+        return str(result)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @tool
 def extract_requirements(text: str) -> str:
-    """?????????????"""
-    items = [part.strip() for part in text.replace("\n", " ").split("?") if part.strip()]
-    return "\n".join(f"- {item}" for item in items[:8])
+    """Extract structured requirements from text."""
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    items = []
+    for line in lines:
+        if any(line.startswith(p) for p in ["-", "*", "1.", "2.", "3."]):
+            items.append(line.lstrip("-* 0123456789."))
+    if not items:
+        items = lines[:5]
+    return "\n".join(f"- {item}" for item in items)
 
 
 @tool
 def outline_from_topics(topics: str) -> str:
-    """?????????????"""
-    raw = topics.replace("\n", ",")
-    items = [item.strip() for item in raw.split(",") if item.strip()]
-    return "\n".join(f"{idx+1}. {item}" for idx, item in enumerate(items[:10]))
-
-
-@tool
-def merge_notes(note_a: str, note_b: str) -> str:
-    """????????????"""
-    return f"{note_a}\n{note_b}".strip()
-
-
-@tool
-def summarize_points(text: str) -> str:
-    """???????????"""
-    sentences = [s.strip() for s in text.replace("\n", " ").split("?") if s.strip()]
-    points = sentences[:6]
-    return "\n".join(f"- {p}" for p in points)
+    """Generate a markdown outline from topic lines."""
+    topic_lines = [t.strip() for t in topics.split("\n") if t.strip()]
+    return "\n".join(f"{i}. {t}" for i, t in enumerate(topic_lines, 1))
 
 
 @tool
 def dedupe_lines(text: str) -> str:
-    """???????????"""
+    """Remove duplicate lines while preserving order."""
     seen = set()
     lines = []
     for line in text.splitlines():
@@ -271,81 +213,53 @@ def dedupe_lines(text: str) -> str:
 
 @tool
 def web_search_stub(query: str) -> str:
-    """???????Bocha Web Search??"""
+    """Web search via Bocha API. Returns formatted results."""
     records = bocha_web_search_records(query, count=5)
     if not records:
-        return "??? BOCHA_API_KEY??????????"
-    lines = ["Bocha ?????"]
+        return "No results. Check BOCHA_API_KEY configuration."
+    lines = ["Bocha search results:"]
     for idx, record in enumerate(records, 1):
         lines.append(f"{idx}. {record['title']}")
         url = record.get("url", "")
         if url:
-            lines.append(f"   ??: {url}")
+            lines.append(f"   URL: {url}")
         snippet = record.get("snippet", "")
         if snippet:
-            lines.append(f"   ??: {snippet[:200]}")
+            lines.append(f"   Snippet: {snippet[:200]}")
     return "\n".join(lines)
 
 
 @tool
-def local_docs_lookup_stub(query: str) -> str:
-    """?????????"""
-    return f"??????????????: {query}"
+def search_knowledge_base(query: str, limit: int = 5) -> str:
+    """Search local knowledge base. Returns formatted results."""
+    records = search_knowledge_base_records(query, limit=limit)
+    if not records:
+        return "No results in local knowledge base."
+    lines = ["Local knowledge base results:"]
+    for idx, record in enumerate(records, 1):
+        title = record.get("title") or record.get("doc_id", f"Doc-{idx}")
+        snippet = record.get("snippet", "") or record.get("content", "")
+        lines.append(f"{idx}. {title}")
+        if snippet:
+            lines.append(f"   {snippet[:300]}")
+    return "\n".join(lines)
 
 
 @tool
-def local_vector_search_stub(query: str) -> str:
-    """????????????"""
-    return f"?????????????: {query}"
+def merge_notes(note_a: str, note_b: str) -> str:
+    """Merge two note strings."""
+    return f"{note_a}\n{note_b}".strip()
 
 
 @tool
-def optimize_query(query: str) -> str:
-    """?????????????"""
-    return f"????????: {query}"
+def summarize_points(text: str) -> str:
+    """Extract key points from text."""
+    sentences = [s.strip() for s in text.replace("\n", " ").split(".") if s.strip()]
+    points = sentences[:6]
+    return "\n".join(f"- {p}" for p in points)
 
 
-@tool
-def explain_term(term: str) -> str:
-    """???????"""
-    return f"{term} ????????????"
-
-
-@tool
-def python_inter(code: str) -> str:
-    """?? Python ?????"""
-    return f"???Python?????????: {code}"
-
-
-@tool
-def fig_inter(spec: str) -> str:
-    """?????????"""
-    return f"??????????????: {spec}"
-
-
-@tool
-def amap_weather(city: str) -> str:
-    """?????????"""
-    return f"?????API???????: {city}"
-
-
-@tool
-def amap_geocode(address: str) -> str:
-    """?????????"""
-    return f"?????API?????????: {address}"
-
-
-@tool
-def amap_poi_search(query: str) -> str:
-    """???? POI ???"""
-    return f"?????API???POI??: {query}"
-
-
-@tool
-def amap_route_plan(origin: str, destination: str) -> str:
-    """?????????"""
-    return f"?????API???????: {origin} -> {destination}"
-
+# -- File operations (workspace sandbox) --
 
 def _workspace_root() -> Path:
     base = os.getenv("WORKSPACE_DIR", "/workspace")
@@ -356,102 +270,58 @@ def _safe_path(path: str) -> Path:
     root = _workspace_root()
     target = (root / path).resolve()
     if root not in target.parents and target != root:
-        raise ValueError("????????")
+        raise ValueError("Path outside workspace")
     return target
 
 
 @tool
 def safe_list_dir(path: str = ".") -> str:
-    """?????????????????"""
+    """List directory contents within workspace."""
     root = _workspace_root()
     if not root.exists():
-        return f"???????: {root}"
+        return f"Workspace not found: {root}"
     target = _safe_path(path)
     if not target.exists() or not target.is_dir():
-        return "?????"
-    items = [p.name for p in target.iterdir()]
-    return "\n".join(items)
+        return "Directory not found"
+    return "\n".join(p.name for p in target.iterdir())
 
 
 @tool
 def safe_read_file(path: str) -> str:
-    """?????????????"""
+    """Read file contents within workspace."""
     root = _workspace_root()
     if not root.exists():
-        return f"???????: {root}"
+        return f"Workspace not found: {root}"
     target = _safe_path(path)
     if not target.exists() or not target.is_file():
-        return "?????"
+        return "File not found"
     return target.read_text(encoding="utf-8")
 
 
 @tool
 def safe_write_file(path: str, content: str) -> str:
-    """?????????????"""
+    """Write file contents within workspace."""
     root = _workspace_root()
     if not root.exists():
-        return f"???????: {root}"
+        return f"Workspace not found: {root}"
     target = _safe_path(path)
     if not target.parent.exists():
-        return "?????"
+        return "Parent directory not found"
     target.write_text(content, encoding="utf-8")
-    return f"???: {target}"
+    return f"Written: {target}"
 
 
 @tool
 def safe_move_file(src: str, dst: str) -> str:
-    """?????????????"""
+    """Move/rename file within workspace."""
     root = _workspace_root()
     if not root.exists():
-        return f"???????: {root}"
+        return f"Workspace not found: {root}"
     src_path = _safe_path(src)
     dst_path = _safe_path(dst)
     if not src_path.exists():
-        return "??????"
+        return "Source not found"
     if not dst_path.parent.exists():
-        return "???????"
+        return "Destination directory not found"
     src_path.replace(dst_path)
-    return f"???: {dst_path}"
-
-
-@tool
-def sql_inter(query: str) -> str:
-    """?? SQL ?????"""
-    return f"?????????SQL: {query}"
-
-
-@tool
-def extract_data_stub(query: str) -> str:
-    """?????????"""
-    return f"??????????????: {query}"
-
-
-@tool
-def execute_terminal_command(command: str) -> str:
-    """???????????"""
-    return f"??????????????: {command}"
-
-
-@tool
-def file_operation_stub(request: str) -> str:
-    """?????????"""
-    return f"??????????????: {request}"
-
-
-@tool
-def news_search_stub(query: str) -> str:
-    """?????????"""
-    return f"??????????????: {query}"
-
-
-@tool
-def finance_search_stub(query: str) -> str:
-    """?????????"""
-    return f"??????????????: {query}"
-
-
-@tool
-def extract_url_content_stub(url: str) -> str:
-    """?? URL ???????"""
-    return f"???URL???????URL: {url}"
-
+    return f"Moved: {dst_path}"
