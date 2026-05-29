@@ -421,10 +421,15 @@ class UnifiedMemoryStore:
 # -- Helpers ---------------------------------------------------------
 
 def _parse_asyncpg_rowcount(result: str) -> int:
-    """Parse rowcount from asyncpg result string like 'INSERT 0 1'."""
+    """Parse rowcount from asyncpg result string like 'INSERT 0 1'.
+
+    asyncpg returns "INSERT 0 1" (3 parts: cmd, oid, count)
+    or "UPDATE 3" (2 parts: cmd, count).
+    Always take the last integer token as rowcount.
+    """
     try:
         parts = result.split()
-        if len(parts) >= 3 and parts[0] in ("INSERT", "UPDATE", "DELETE"):
+        if len(parts) >= 2 and parts[0] in ("INSERT", "UPDATE", "DELETE", "SELECT"):
             return int(parts[-1])
         return 0
     except (ValueError, IndexError):
