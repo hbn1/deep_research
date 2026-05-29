@@ -2,6 +2,8 @@
 
 Runs after the final report. Accepts memory_manager explicitly
 rather than relying on a module-level global.
+
+Supports both v1 (MemoryManager) and v2 (MemoryOrchestrator).
 """
 
 import logging
@@ -19,7 +21,7 @@ def memory_reflect_node(state: ResearchState, agent, agent_name: str,
         state: Current ResearchState.
         agent: LLM agent instance (unused, kept for signature compatibility).
         agent_name: Agent display name.
-        memory_manager: Optional MemoryManager for persistence.
+        memory_manager: MemoryManager (v1) or MemoryOrchestrator (v2).
     """
     logger.info("%s starting | agent=%s",
                 colorize("[memory_reflect]", "cyan"),
@@ -46,15 +48,17 @@ def memory_reflect_node(state: ResearchState, agent, agent_name: str,
         facts = extracted.get("facts", [])
         patterns = extracted.get("procedural", [])
 
-        for pat in patterns:
-            memory_manager.procedural.learn_pattern(
-                user_id=state.get("user_id", "default_user"),
-                trigger=pat.get("trigger", f"Research task: {query[:80]}"),
-                action=pat.get("action", "Research completed successfully"),
-                context=query[:200],
-                importance=0.6,
-                thread_id=state.get("tenant_id", "default"),
-            )
+        # v1 path: Persist procedural patterns via legacy ProceduralMemoryStore
+        if hasattr(memory_manager, "procedural"):
+            for pat in patterns:
+                memory_manager.procedural.learn_pattern(
+                    user_id=state.get("user_id", "default_user"),
+                    trigger=pat.get("trigger", f"Research task: {query[:80]}"),
+                    action=pat.get("action", "Research completed successfully"),
+                    context=query[:200],
+                    importance=0.6,
+                    thread_id=state.get("tenant_id", "default"),
+                )
 
         logger.info("%s extracted facts=%d patterns=%d",
                     colorize("[memory_reflect]", "green"),

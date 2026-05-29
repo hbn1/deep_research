@@ -8,7 +8,7 @@ Stateless. Coordinates:
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Set
 
 from .base import MemoryEntry, MemoryType
 from .short_term_service import ShortTermService
@@ -51,6 +51,8 @@ class MemoryOrchestrator:
         self._lt = long_term
         self._extractor = extractor
         self._injector = injector or MemoryInjector()
+        # Guard against concurrent summary generation for the same thread
+        self._summarizing: Set[str] = set()
 
     # ── Recall (before each turn) ──────────────────────────
 
@@ -148,11 +150,14 @@ class MemoryOrchestrator:
         if tasks:
             await asyncio.gather(*tasks)
 
-        # 4. Trigger summary if threshold reached
+        # 4. Trigger summary if threshold reached (with atomic guard)
+        summary_key = f"{tenant_id}:{user_id}:{thread_id}"
         count = self._st.message_count(tenant_id, user_id, thread_id)
         summary_threshold = 20
-        if count >= summary_threshold and not self._st.has_summary(tenant_id, user_id, thread_id):
-            # Run summary generation as background task, don't block the response
+        if (count >= summary_threshold
+                and not self._st.has_summary(tenant_id, user_id, thread_id)
+                and summary_key not in self._summarizing):
+            self._summarizing.add(summary_key)
             asyncio.create_task(
                 self._generate_summary(tenant_id, user_id, thread_id, count)
             )
@@ -177,7 +182,13 @@ class MemoryOrchestrator:
     async def _generate_summary(
         self, tenant_id: str, user_id: str, thread_id: str, msg_count: int
     ) -> None:
-        """Generate conversation summary via LLM. Non-blocking, best-effort."""
+        """Generate conversation summary via LLM. Non-blocking, best-effort.
+
+        Uses in-memory guard to prevent duplicate summary tasks for the same thread.
+        Trimming is safe: uses snapshot-based count to avoid deleting messages that
+        arrived during the LLM call.
+        """
+        summary_key = f"{tenant_id}:{user_id}:{thread_id}"
         try:
             msgs = self._st.get_messages(tenant_id, user_id, thread_id, last_n=min(msg_count, 30))
             text = "\n".join(
@@ -185,12 +196,18 @@ class MemoryOrchestrator:
                 for m in msgs
             )
             summary = await self._extractor.summarize(text)
+            if not summary:
+                return
             self._st.set_summary(tenant_id, user_id, thread_id, summary)
-            # Trim old messages after summary is generated
-            self._st.trim_messages(tenant_id, user_id, thread_id, keep_last=10)
-            logger.info("[summary] generated for thread=%s", thread_id)
+            # Safe trim: use current count as lower bound, keep at least 5 messages
+            current_count = self._st.message_count(tenant_id, user_id, thread_id)
+            keep = max(5, min(10, current_count // 3))
+            trimmed = self._st.trim_messages(tenant_id, user_id, thread_id, keep_last=keep)
+            logger.info("[summary] generated for thread=%s trimmed=%d", thread_id, trimmed)
         except Exception as exc:
             logger.warning("[summary] generation failed (non-critical): %s", exc)
+        finally:
+            self._summarizing.discard(summary_key)
 
 
 def _langchainify(messages: list[dict]) -> list:
