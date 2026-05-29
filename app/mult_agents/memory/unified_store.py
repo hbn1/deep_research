@@ -3,7 +3,7 @@
 Search flow: Milvus vector coarse-filter -> PG business-score fine-rank.
 
 All public methods enforce tenant_id isolation.
-PG operations use run_in_executor wrapping psycopg (Phase 5 will switch to asyncpg).
+PG operations use asyncpg (native async) with psycopg fallback.
 """
 
 import asyncio
@@ -34,6 +34,7 @@ _RANK_SQL = """
 class UnifiedMemoryStore:
     """Unified long-term memory: PG (structured) + optional Milvus (vector).
 
+    PG backend: asyncpg (preferred) -> psycopg (fallback).
     All methods enforce tenant_id as the first filter in PG WHERE clauses.
     """
 
@@ -48,6 +49,8 @@ class UnifiedMemoryStore:
         self._dsn = postgres_dsn
         self._embedder = embedding_provider
         self._vector = milvus_backend
+        self._pool = None          # asyncpg pool
+        self._use_asyncpg = False
 
         if auto_apply_schema and postgres_dsn:
             try:
@@ -56,10 +59,40 @@ class UnifiedMemoryStore:
             except Exception as exc:
                 logger.warning("Schema apply failed (non-fatal): %s", exc)
 
+    # -- Lifecycle ---------------------------------------------------
+
+    async def _ensure_pool(self) -> None:
+        """Lazy-init asyncpg pool. Falls back to psycopg silently."""
+        if self._pool is not None:
+            return
+        try:
+            import asyncpg
+            self._pool = await asyncpg.create_pool(
+                self._dsn,
+                min_size=2,
+                max_size=10,
+                command_timeout=30,
+            )
+            # Quick sanity check
+            async with self._pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+            self._use_asyncpg = True
+            logger.info("UnifiedMemoryStore using asyncpg (pool size 2-10)")
+        except Exception as exc:
+            logger.warning("asyncpg unavailable, fallback to psycopg: %s", exc)
+            self._pool = None
+            self._use_asyncpg = False
+
+    async def close(self) -> None:
+        """Close the asyncpg pool if active."""
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+            self._use_asyncpg = False
+
     # -- Public API --------------------------------------------------
 
     async def save(self, entry: MemoryEntry) -> str:
-        """Save one entry to PG, fire-and-forget index to Milvus. Returns id."""
         if not entry.id:
             entry.id = str(uuid4())
 
@@ -82,7 +115,6 @@ class UnifiedMemoryStore:
         return entry.id
 
     async def save_batch(self, entries: list[MemoryEntry]) -> list[str]:
-        """Batch save to PG + Milvus."""
         for e in entries:
             if not e.id:
                 e.id = str(uuid4())
@@ -103,19 +135,15 @@ class UnifiedMemoryStore:
         memory_type: Optional[MemoryType] = None,
         limit: int = 6,
     ) -> list[MemoryEntry]:
-        """Milvus coarse-filter -> PG fine-rank -> update recall."""
         mt = memory_type.value if memory_type else None
 
-        # Step 1: Milvus
         candidate_ids = await self._milvus_coarse(query_text, tenant_id, user_id, mt, limit)
 
-        # Step 2: PG rank
         if candidate_ids:
             entries = await self._pg_ranked_search(candidate_ids, tenant_id, limit)
         else:
             entries = await self._pg_text_search(query_text, tenant_id, user_id, mt, limit)
 
-        # Step 3: update recall
         if entries:
             await self._pg_execute(
                 """UPDATE unified_memories
@@ -182,19 +210,101 @@ class UnifiedMemoryStore:
         )
         return {r["memory_type"]: r["cnt"] for r in rows}
 
-    # -- Private: PG -------------------------------------------------
+    # -- Private: PG backend (asyncpg preferred, psycopg fallback) ----
 
     async def _pg_execute(self, sql: str, *params) -> int:
+        """Execute a statement. Returns rowcount."""
+        await self._ensure_pool()
+        if self._use_asyncpg:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(sql, *params)
+                # asyncpg returns e.g. "INSERT 0 1"; parse rowcount
+                return _parse_asyncpg_rowcount(result)
+        return await self._pg_execute_psycopg(sql, *params)
+
+    async def _pg_fetch(self, sql: str, *params) -> list[dict]:
+        """Fetch rows as list of dicts."""
+        await self._ensure_pool()
+        if self._use_asyncpg:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+                return [dict(r) for r in rows]
+        return await self._pg_fetch_psycopg(sql, *params)
+
+    async def _pg_ranked_search(
+        self, ids: list[str], tenant_id: str, limit: int
+    ) -> list[MemoryEntry]:
+        await self._ensure_pool()
+        if self._use_asyncpg:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT *, {_RANK_SQL} FROM unified_memories "
+                    "WHERE id = ANY($1::text[]) AND tenant_id = $2 "
+                    "ORDER BY biz_score DESC LIMIT $3",
+                    ids, tenant_id, limit,
+                )
+                return [_row_to_entry(dict(r)) for r in rows]
+        return await self._pg_ranked_search_psycopg(ids, tenant_id, limit)
+
+    async def _pg_text_search(
+        self, query: str, tenant_id: str, user_id: str,
+        memory_type: Optional[str], limit: int,
+    ) -> list[MemoryEntry]:
+        await self._ensure_pool()
+        conds = ["tenant_id = $1", "user_id = $2"]
+        params: list = [tenant_id, user_id]
+        idx = 3
+        if memory_type:
+            conds.append(f"memory_type = ${idx}")
+            params.append(memory_type)
+            idx += 1
+        where = " AND ".join(conds)
+        params.extend([f"%{query}%", limit])
+
+        if self._use_asyncpg:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT * FROM unified_memories WHERE {where} "
+                    f"AND content::text ILIKE ${idx} "
+                    f"ORDER BY created_at DESC LIMIT ${idx + 1}",
+                    *params,
+                )
+                return [_row_to_entry(dict(r)) for r in rows]
+        return await self._pg_text_search_psycopg(query, tenant_id, user_id, memory_type, limit)
+
+    async def _pg_batch_insert(self, entries: list[MemoryEntry]) -> None:
+        await self._ensure_pool()
+        if self._use_asyncpg:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    for e in entries:
+                        await conn.execute(
+                            """INSERT INTO unified_memories
+                               (id, tenant_id, user_id, thread_id, memory_type, namespace,
+                                content, importance, created_at, updated_at)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,NOW(),NOW())
+                               ON CONFLICT (id) DO UPDATE SET
+                                content=EXCLUDED.content, importance=EXCLUDED.importance, updated_at=NOW()""",
+                            e.id, _tenant(e), e.user_id or "", e.thread_id or "",
+                            e.memory_type.value, e.namespace or "",
+                            _serialize_content(e.content), e.importance,
+                        )
+            return
+        await self._pg_batch_insert_psycopg(entries)
+
+    # -- psycopg fallback (kept for compat) --------------------------
+
+    async def _pg_execute_psycopg(self, sql: str, *params) -> int:
         import psycopg
         def _run():
             with psycopg.connect(self._dsn) as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)
                     conn.commit()
-                    return cur.rowcount
+                    return cur.rowcount or 0
         return await asyncio.get_event_loop().run_in_executor(None, _run)
 
-    async def _pg_fetch(self, sql: str, *params) -> list[dict]:
+    async def _pg_fetch_psycopg(self, sql: str, *params) -> list[dict]:
         import psycopg
         def _run():
             with psycopg.connect(self._dsn) as conn:
@@ -204,23 +314,24 @@ class UnifiedMemoryStore:
                     return [dict(zip(cols, row)) for row in cur.fetchall()]
         return await asyncio.get_event_loop().run_in_executor(None, _run)
 
-    async def _pg_ranked_search(self, ids: list[str], tenant_id: str, limit: int) -> list[MemoryEntry]:
+    async def _pg_ranked_search_psycopg(
+        self, ids: list[str], tenant_id: str, limit: int
+    ) -> list[MemoryEntry]:
         import psycopg
         def _run():
             with psycopg.connect(self._dsn) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"""SELECT *, {_RANK_SQL}
-                            FROM unified_memories
-                            WHERE id = ANY(%s) AND tenant_id = %s
-                            ORDER BY biz_score DESC LIMIT %s""",
+                        f"SELECT *, {_RANK_SQL} FROM unified_memories "
+                        "WHERE id = ANY(%s) AND tenant_id = %s "
+                        "ORDER BY biz_score DESC LIMIT %s",
                         (ids, tenant_id, limit),
                     )
                     cols = [desc[0] for desc in cur.description]
                     return [_row_to_entry(dict(zip(cols, row))) for row in cur.fetchall()]
         return await asyncio.get_event_loop().run_in_executor(None, _run)
 
-    async def _pg_text_search(
+    async def _pg_text_search_psycopg(
         self, query: str, tenant_id: str, user_id: str,
         memory_type: Optional[str], limit: int,
     ) -> list[MemoryEntry]:
@@ -243,7 +354,7 @@ class UnifiedMemoryStore:
                     return [_row_to_entry(dict(zip(cols, row))) for row in cur.fetchall()]
         return await asyncio.get_event_loop().run_in_executor(None, _run)
 
-    async def _pg_batch_insert(self, entries: list[MemoryEntry]) -> None:
+    async def _pg_batch_insert_psycopg(self, entries: list[MemoryEntry]) -> None:
         import psycopg
         def _run():
             with psycopg.connect(self._dsn) as conn:
@@ -269,7 +380,6 @@ class UnifiedMemoryStore:
         self, query_text: str, tenant_id: str, user_id: str,
         memory_type: Optional[str], limit: int,
     ) -> list[str]:
-        """Milvus vector search. Returns candidate PG IDs from metadata."""
         if not self._vector or not self._vector.health_check():
             return []
 
@@ -285,7 +395,6 @@ class UnifiedMemoryStore:
             return []
 
     async def _index_milvus(self, entry: MemoryEntry) -> None:
-        """Index entry text into Milvus with pg_id in metadata."""
         if not self._vector or not self._vector.health_check():
             return
         try:
@@ -303,15 +412,24 @@ class UnifiedMemoryStore:
 
     @staticmethod
     def _fire_and_forget(coro):
-        """Schedule a coroutine as a background task, ignoring errors."""
         try:
             asyncio.create_task(coro)
         except RuntimeError:
-            # No running event loop (e.g. during tests)
             pass
 
 
 # -- Helpers ---------------------------------------------------------
+
+def _parse_asyncpg_rowcount(result: str) -> int:
+    """Parse rowcount from asyncpg result string like 'INSERT 0 1'."""
+    try:
+        parts = result.split()
+        if len(parts) >= 3 and parts[0] in ("INSERT", "UPDATE", "DELETE"):
+            return int(parts[-1])
+        return 0
+    except (ValueError, IndexError):
+        return 0
+
 
 def _tenant(entry: MemoryEntry) -> str:
     return (entry.metadata or {}).get("tenant_id", "default_tenant")
