@@ -1,9 +1,12 @@
-import json, logging
+﻿import json, logging
 from langchain_core.messages import HumanMessage
 from ..state import ResearchState
 from ..tools import bocha_web_search_records, search_knowledge_base_records
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
 from ._common import (_minimal_record_filter, _assign_source_ids, _format_raw_records, _summarize_records, _normalize_source_ids, _finalize_query_traces)
+from ._common import _estimate_relevance, _prune_evidence_to_allowed_sources, _enrich_evidence_from_raw
+from .plan import _build_queries
+from .deep_dive import _dedupe_sources, _is_official_domain
 
 logger = logging.getLogger('mult_agents')
 
@@ -57,7 +60,7 @@ def _fallback_web_evidence(records: list[dict]) -> dict:
                 "notes": "",
             }
         )
-    return {"summary": "完成网页证据采集。", "evidence": evidence, "gaps": []}
+    return {"summary": "Web evidence collection complete", "evidence": evidence, "gaps": []}
 
 
 
@@ -80,7 +83,7 @@ def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchSta
 
     # ?? Parallel search with enterprise engine ??
     from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-    from .search import search as enterprise_search
+    from ..search import search as enterprise_search
 
     all_raw_records: list[dict] = []
     query_index_map: dict[str, int] = {}

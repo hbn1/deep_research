@@ -4,6 +4,9 @@ from ..state import ResearchState
 from ..tools import bocha_web_search_records, search_knowledge_base_records
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
 from ._common import (_minimal_record_filter, _assign_source_ids, _format_raw_records, _summarize_records, _normalize_source_ids, _finalize_query_traces)
+from ._common import _estimate_relevance, _prune_evidence_to_allowed_sources, _enrich_evidence_from_raw
+from .plan import _build_queries
+from .deep_dive import _dedupe_sources
 
 logger = logging.getLogger('mult_agents')
 

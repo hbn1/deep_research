@@ -1,8 +1,9 @@
-import json, logging
+import json, logging, re
 from langchain_core.messages import HumanMessage
 from ..state import ResearchState
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
 from ._common import _extract_query_terms, _estimate_relevance
+from .deep_dive import _dedupe_sources
 
 logger = logging.getLogger('mult_agents')
 
