@@ -1,5 +1,5 @@
 ﻿{
-    "model": "qwen-plus",
+    "model": "qwen3.6-plus",
     "small_model": "qwen-turbo",
     "max_iterations": 3,
     "search_backends": "bocha",
@@ -15,5 +15,5 @@
     "node_model_overrides": {
         "direct_responder": "qwen-turbo",
         "intent_router": "qwen-turbo"
-    }
+                             }
 }

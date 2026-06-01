@@ -1,4 +1,4 @@
-"""State definitions for the multi-agent research workflow."""
+﻿"""State definitions for the multi-agent research workflow."""
 
 import operator
 from typing import Annotated, List
@@ -31,6 +31,7 @@ class ResearchState(TypedDict):
     analysis: str
     needs_more_research: bool
     missing_gaps: list[str]
+    missing_info_weight: int
     supplementary_queries: list[dict]
     findings: list[dict]
     claim_map: list[dict]
@@ -82,6 +83,7 @@ def create_initial_state(
         "analysis": "",
         "needs_more_research": False,
         "missing_gaps": [],
+        "missing_info_weight": 5,
         "supplementary_queries": [],
         "findings": [],
         "claim_map": [],

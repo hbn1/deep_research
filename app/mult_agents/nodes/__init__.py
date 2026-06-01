@@ -25,6 +25,7 @@ from .write import (
     _render_execution_appendix, _ensure_reference_section, write_node,
 )
 from .memory_reflect import memory_reflect_node
+from .prune import prune_context_node
 from ._common import (
     _minimal_record_filter, _assign_source_ids, _format_raw_records,
     _summarize_records, _normalize_source_ids, _finalize_query_traces,
@@ -36,5 +37,5 @@ __all__ = [
     "detect_intent", "intent_node", "direct_answer_node",
     "plan_node", "web_search_node", "local_rag_node",
     "deep_dive_node", "analyze_node", "reflect_node",
-    "write_node", "memory_reflect_node",
+    "write_node", "memory_reflect_node", "prune_context_node",
 ]

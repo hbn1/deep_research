@@ -55,6 +55,7 @@ def analyze_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     claim_map = payload.get("claim_map") if isinstance(payload.get("claim_map"), list) else fallback["claim_map"]
     needs_more_research = payload.get("needs_more_research", False)
     missing_gaps = payload.get("missing_gaps", [])
+    missing_info_weight = int(payload.get("missing_info_weight", 5))
     analysis_summary = payload.get("analysis_summary", content)
     return {
         "analysis": analysis_summary,
@@ -62,6 +63,7 @@ def analyze_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         "claim_map": claim_map,
         "needs_more_research": needs_more_research,
         "missing_gaps": missing_gaps,
+        "missing_info_weight": missing_info_weight,
         "messages": messages,
     }
 

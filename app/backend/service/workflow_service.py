@@ -54,15 +54,18 @@ class WorkflowService:
                 return
             base_config = AppConfig.from_file(self._config_path)
 
-            # Try v2 MemoryOrchestrator first
-            orch = await self._try_init_v2_memory(base_config)
-            if orch:
-                self._memory_orchestrator = orch
-                logger.info("WorkflowService using v2 MemoryOrchestrator")
+            # Try v2 MemoryOrchestrator first (only when memory is enabled)
+            if base_config.enable_memory:
+                orch = await self._try_init_v2_memory(base_config)
+                if orch:
+                    self._memory_orchestrator = orch
+                    logger.info("WorkflowService using v2 MemoryOrchestrator")
+                else:
+                    # Fall back to v1 MemoryManager
+                    self._memory_manager = build_memory_manager(base_config)
+                    logger.info("WorkflowService using v1 MemoryManager (fallback)")
             else:
-                # Fall back to v1 MemoryManager
-                self._memory_manager = build_memory_manager(base_config)
-                logger.info("WorkflowService using v1 MemoryManager (fallback)")
+                logger.info("WorkflowService memory disabled, skipping all memory init")
 
             agents = build_agents(base_config.model, base_config.api_key, base_config)
             checkpointer, _ = build_checkpointer(base_config)

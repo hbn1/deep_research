@@ -51,20 +51,33 @@ class AgentBundle:
 
 
 def build_agent(model: str, api_key: str, prompt_key: str, temperature: float, tools: list):
-    if api_key:
-        os.environ["DASHSCOPE_API_KEY"] = api_key
-    llm = ChatTongyi(model=model, temperature=temperature)
+    llm = ChatTongyi(model=model, temperature=temperature, dashscope_api_key=api_key or None)
     prompt = PROMPTS[prompt_key]
-    return create_agent(model=llm, tools=tools, system_prompt=prompt)
+    primary = create_agent(model=llm, tools=tools, system_prompt=prompt)
+    # Enterprise fallback: degrade to qwen-turbo on rate limit / timeout
+    try:
+        fallback_llm = ChatTongyi(model="qwen-turbo", temperature=temperature, dashscope_api_key=api_key or None)
+        fallback = create_agent(model=fallback_llm, tools=tools, system_prompt=prompt)
+        return primary.with_fallbacks([fallback])
+    except Exception:
+        return primary
 
 
 def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
-    rag_config = RAGConfig(
-        milvus_host=config.milvus_host,
-        milvus_port=config.milvus_port,
-        collection_name=config.milvus_collection,
-    )
-    init_rag_system(api_key=api_key, config=rag_config, tenant_id=config.tenant_id)
+    # LangSmith / OpenTelemetry tracing (zero-cost when disabled)
+    if os.getenv("LANGCHAIN_TRACING_V2") == "true":
+        os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGCHAIN_PROJECT", "deep-research"))
+        logger.info("LangSmith tracing enabled | project=%s", os.environ["LANGCHAIN_PROJECT"])
+
+    if getattr(config, "enable_milvus", False):
+        rag_config = RAGConfig(
+            milvus_host=config.milvus_host,
+            milvus_port=config.milvus_port,
+            collection_name=config.milvus_collection,
+        )
+        init_rag_system(api_key=api_key, config=rag_config, tenant_id=config.tenant_id)
+    else:
+        logger.info("Milvus is disabled, skipping init_rag_system.")
     init_search_from_config(
         api_key=api_key,
         serper_api_key=config.serper_api_key,

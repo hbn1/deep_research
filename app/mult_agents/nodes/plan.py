@@ -47,38 +47,32 @@ def _guess_primary_entity(query: str) -> str:
 
 
 def _derive_direct_search_queries(query: str) -> list[str]:
+    """Generate direct search queries from user query.
+    
+    Uses simple heuristics: the original query + entity-focused variants.
+    No longer generates corrupted Chinese suffixes.
+    """
     base_query = query.strip()
     if not base_query:
         return []
     entity = _guess_primary_entity(base_query)
     candidates = [base_query]
-    if entity:
-        candidates.extend(
-            [
-                f"{entity}是什么",
-                f"{entity} GitHub",
-                f"{entity} 官方文档",
-                f"{entity} 使用趋势",
-                f"{entity} AI Agent",
-            ]
-        )
-    else:
-        candidates.extend(
-            [
-                f"{base_query} 是什么",
-                f"{base_query} GitHub",
-                f"{base_query} 官方文档",
-            ]
-        )
-    deduped: list[str] = []
-    for item in candidates:
-        text = item.strip()
-        if text and text not in deduped:
-            deduped.append(text)
-    return deduped[:6]
-
-
-
+    if entity and len(entity) >= 3:
+        # Generate clean, language-appropriate search variants
+        candidates.extend([
+            f"{entity} overview",
+            f"{entity} comparison",
+            f"{entity} performance",
+            f"{entity} best practices",
+        ])
+    # Deduplicate preserving order
+    seen = set()
+    result = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result[:4]  # Limit to 4 queries max
 
 def _is_query_grounded(candidate: str, user_query: str) -> bool:
     candidate_terms = set(_extract_query_terms(candidate))

@@ -327,15 +327,33 @@ def write_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     valid_source_ids = [str(item.get("source_id", "")).strip() for item in state.get("source_index", []) if item.get("source_id")]
     valid_source_ids = [item for item in valid_source_ids if item][:80]
     valid_source_ids_set = set(valid_source_ids)
+
+    # Trim findings and source_index to reduce prompt size
+    trimmed_findings = []
+    for f in (state.get("findings") or [])[:12]:
+        trimmed_findings.append({
+            "claim_id": f.get("claim_id", ""),
+            "claim": str(f.get("claim", ""))[:300],
+            "confidence": f.get("confidence", ""),
+            "source_ids": (f.get("source_ids") or [])[:4],
+        })
+    
+    trimmed_source_index = [
+        {"source_id": s.get("source_id"), "source_type": s.get("source_type"),
+         "label": str(s.get("label", ""))[:120], "locator": str(s.get("locator", ""))[:200]}
+        for s in (state.get("source_index") or [])
+        if s.get("source_id") in valid_source_ids_set
+    ][:15]
+    
     
     prompt = (
         "请严格根据以下信息撰写最终的 Markdown 研报。请直接输出正文，绝对不要输出任何 JSON 结构，也不要复述你的指令。\n\n"
         f"核心问题：{state['query']}\n"
         f"子问题拆解：{json.dumps(state.get('sub_questions', []), ensure_ascii=False)}\n\n"
         "【分析结论 (Findings)】：\n"
-        f"{json.dumps(state.get('findings', []), ensure_ascii=False)}\n\n"
+        f"{json.dumps(trimmed_findings, ensure_ascii=False)}\n\n"
         "【可用来源索引 (source_index)】：\n"
-        f"{json.dumps(state.get('source_index', []), ensure_ascii=False)}\n\n"
+        f"{json.dumps(trimmed_source_index, ensure_ascii=False)}\n\n"
         "【合法引用ID列表】：\n"
         f"{json.dumps(valid_source_ids, ensure_ascii=False)}\n\n"
         "【可能存在的风险/冲突 (Audit Flags)】：\n"

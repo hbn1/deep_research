@@ -256,7 +256,7 @@ def deep_dive_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
         return {}
     # Fast path: when total evidence <= 6 items, skip LLM and use programmatic audit
     total_evidence = len(state.get("web_evidence", [])) + len(state.get("local_evidence", []))
-    if total_evidence <= 6:
+    if total_evidence <= 12:
         logger.info("%s ?????????(%d?)??? LLM ??", colorize("[deep_dive]", "green"), total_evidence)
         fb = _fallback_audit(state)
         return {

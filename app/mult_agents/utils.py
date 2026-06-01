@@ -173,7 +173,7 @@ def estimate_tokens(text: str) -> int:
     """Rough token count: ~1 token per 2 CJK chars or 4 ASCII chars."""
     if not text:
         return 0
-    cjk = sum(1 for ch in text if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ")
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u309f" or "\u30a0" <= ch <= "\u30ff" or "\uac00" <= ch <= "\ud7af")
     ascii_chars = len(text) - cjk
     return (cjk // 2) + (ascii_chars // 4)
 

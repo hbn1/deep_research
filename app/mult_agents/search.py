@@ -52,6 +52,21 @@ except ImportError:
 
     httpx = None  # type: ignore
 
+# Global connection pool for httpx (reuse across requests)
+_httpx_client: "Optional[Any]" = None
+
+
+def _get_httpx_client() -> "Any":
+    global _httpx_client
+    if _httpx_client is None or _httpx_client.is_closed:
+        _httpx_client = httpx.Client(
+            timeout=30.0,
+            follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DeepResearch/1.0; +https://deepresearch.ai)"}
+        )
+    return _httpx_client
+
 
 
 # ── 数据结构 ──────────────────────────────────────────────
@@ -128,15 +143,13 @@ class SearchConfig:
 
     """搜索配置"""
 
-    bocha_api_key: str = ""
-
     serper_api_key: str = ""
 
     tavily_api_key: str = ""
 
 
 
-    enabled_backends: list[str] = field(default_factory=lambda: ["bocha"])
+    enabled_backends: list[str] = field(default_factory=lambda: ["tavily"])
 
     fallback_backends: list[str] = field(default_factory=lambda: ["serper", "tavily"])
 
@@ -491,22 +504,12 @@ def fetch_page_content(url: str, timeout: float = 8.0, max_length: int = 3000) -
     try:
 
         if _HAS_HTTPX:
-
-            with httpx.Client(timeout=timeout, follow_redirects=True, headers={
-
-                "User-Agent": "Mozilla/5.0 (compatible; DeepResearch/1.0; +https://deepresearch.ai)"
-
-            }) as client:
-
-                resp = client.get(url)
-
-                if resp.status_code != 200:
-
-                    return ""
-
-                text = _extract_text_from_html(resp.text)
-
-                return text[:max_length] if text else ""
+            client = _get_httpx_client()
+            resp = client.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                return ""
+            text = _extract_text_from_html(resp.text)
+            return text[:max_length] if text else ""
 
         else:
 
@@ -756,89 +759,6 @@ def rerank_results(records: list[dict], query: str, config: SearchConfig) -> lis
 
 
 
-def _bocha_search(query: str, api_key: str, count: int, freshness: str, timeout: float) -> list[dict]:
-
-    """Bocha API 搜索"""
-
-    if not api_key:
-
-        return []
-
-    payload = {"query": query, "summary": True, "freshness": freshness, "count": count}
-
-    req = urllib.request.Request(
-
-        url="https://api.bocha.cn/v1/web-search",
-
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-
-        method="POST",
-
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-
-    )
-
-    try:
-
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-
-            raw = resp.read().decode("utf-8")
-
-        result = json.loads(raw)
-
-    except Exception as e:
-
-        logger.warning("[bocha] search failed: %s", e)
-
-        return []
-
-
-
-    data = result.get("data", {})
-
-    pages = data.get("webPages", [])
-
-    if isinstance(pages, dict):
-
-        pages = pages.get("value") or pages.get("items") or []
-
-    if not isinstance(pages, list):
-
-        return []
-
-
-
-    records = []
-
-    for idx, page in enumerate(pages[:count], 1):
-
-        if not isinstance(page, dict):
-
-            continue
-
-        url = str(page.get("url") or "").strip()
-
-        records.append({
-
-            "source_id": f"WEB-{idx}",  # prefix assigned later
-
-            "title": page.get("name") or f"web_result_{idx}",
-
-            "url": url,
-
-            "snippet": page.get("summary") or "",
-
-            "domain": _extract_domain(url),
-
-            "source_type": "web",
-
-            "published_at": page.get("datePublished") or page.get("dateLastCrawled") or "",
-
-            "backend": "bocha",
-
-        })
-
-    return records
 
 
 
@@ -854,23 +774,16 @@ def _serper_search(query: str, api_key: str, count: int, _freshness: str, timeou
 
     try:
 
-        with httpx.Client(timeout=timeout) as client:
-
-            resp = client.post(
-
-                "https://google.serper.dev/search",
-
-                json={"q": query, "num": count},
-
-                headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-
-            )
-
-            if resp.status_code != 200:
-
-                return []
-
-            data = resp.json()
+        client = _get_httpx_client()
+        resp = client.post(
+            "https://google.serper.dev/search",
+            timeout=timeout,
+            json={"q": query, "num": count},
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
 
     except Exception as e:
 
@@ -922,35 +835,22 @@ def _tavily_search(query: str, api_key: str, count: int, _freshness: str, timeou
 
     try:
 
-        with httpx.Client(timeout=timeout) as client:
-
-            resp = client.post(
-
-                "https://api.tavily.com/search",
-
-                json={
-
-                    "query": query,
-
-                    "search_depth": "basic",
-
-                    "max_results": count,
-
-                    "include_answer": False,
-
-                },
-
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-
-            )
-
-            if resp.status_code != 200:
-
-                logger.warning("[tavily] search failed: HTTP %s", resp.status_code)
-
-                return []
-
-            data = resp.json()
+        client = _get_httpx_client()
+        resp = client.post(
+            "https://api.tavily.com/search",
+            timeout=timeout,
+            json={
+                "query": query,
+                "search_depth": "basic",
+                "max_results": count,
+                "include_answer": False,
+            },
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+        if resp.status_code != 200:
+            logger.warning("[tavily] search failed: HTTP %s", resp.status_code)
+            return []
+        data = resp.json()
 
     except Exception as e:
 
@@ -1002,11 +902,12 @@ _search_config: Optional[SearchConfig] = None
 
 
 
-def init_search(config: SearchConfig, redis_url: str = ""):
+def init_search(config: SearchConfig, redis_url: str = "", tenant_id: str = "default_tenant"):
 
-    global _search_cache, _search_config
+    global _search_cache, _search_config, _search_tenant_id
 
     _search_config = config
+    _search_tenant_id = tenant_id
 
     if config.cache_enabled:
 
@@ -1017,9 +918,9 @@ def init_search(config: SearchConfig, redis_url: str = ""):
 
     # 初始化 rewrite LLM
 
-    if config.rewrite_enabled and config.bocha_api_key:
+    if config.rewrite_enabled:
 
-        init_rewrite_llm(config.bocha_api_key, config.rewrite_model)
+        init_rewrite_llm(os.getenv("DASHSCOPE_API_KEY", ""), config.rewrite_model)
 
 
 
@@ -1033,7 +934,6 @@ def _search_single_backend(
 
     backends: dict[str, Callable[..., list[dict]]] = {
 
-        "bocha": _bocha_search,
 
         "serper": _serper_search,
 
@@ -1043,7 +943,6 @@ def _search_single_backend(
 
     api_keys = {
 
-        "bocha": config.bocha_api_key,
 
         "serper": config.serper_api_key,
 
@@ -1115,7 +1014,7 @@ def search(
 
     if enable_cache and _search_cache is not None:
 
-        cached = _search_cache.get(query)
+        cached = _search_cache.get(f"{_search_tenant_id}:{query}")
 
         if cached:
 
@@ -1269,7 +1168,7 @@ def search(
 
     if enable_cache and _search_cache is not None:
 
-        _search_cache.set(query, all_records)
+        _search_cache.set(f"{_search_tenant_id}:{query}", all_records)
 
 
 

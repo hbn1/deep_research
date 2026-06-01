@@ -49,7 +49,7 @@ def init_search_from_config(
     api_key: str = "",
     serper_api_key: str = "",
     tavily_api_key: str = "",
-    search_backends: str = "bocha",
+    search_backends: str = "tavily",
     search_fallback_backends: str = "serper,tavily",
     search_count: int = 4,
     search_timeout: float = 15.0,
@@ -65,7 +65,6 @@ def init_search_from_config(
     if _search_initialized:
         return
     config = SearchConfig(
-        bocha_api_key=os.getenv("BOCHA_API_KEY", "").strip(),
         serper_api_key=serper_api_key,
         tavily_api_key=tavily_api_key,
         enabled_backends=[b.strip() for b in search_backends.split(",") if b.strip()],
@@ -79,7 +78,7 @@ def init_search_from_config(
         rewrite_enabled=search_rewrite_enabled,
         rewrite_model="qwen-turbo",
     )
-    init_search(config, redis_url=os.getenv("REDIS_URL", "").strip())
+    init_search(config, redis_url=os.getenv("REDIS_URL", "").strip(), tenant_id=os.getenv("TENANT_ID", "default_tenant").strip())
     _search_initialized = True
 
 
@@ -213,11 +212,12 @@ def dedupe_lines(text: str) -> str:
 
 @tool
 def web_search_stub(query: str) -> str:
-    """Web search via Bocha API. Returns formatted results."""
-    records = bocha_web_search_records(query, count=5)
+    """Web search via enterprise search engine. Returns formatted results."""
+    from .search import search
+    records = search(query)
     if not records:
-        return "No results. Check BOCHA_API_KEY configuration."
-    lines = ["Bocha search results:"]
+        return "No results."
+    lines = ["Search results:"]
     for idx, record in enumerate(records, 1):
         lines.append(f"{idx}. {record['title']}")
         url = record.get("url", "")
