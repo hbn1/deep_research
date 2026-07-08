@@ -1,4 +1,5 @@
 import json, logging, re
+from datetime import date
 from langchain_core.messages import HumanMessage
 from ..state import ResearchState
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
@@ -344,9 +345,16 @@ def write_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         for s in (state.get("source_index") or [])
         if s.get("source_id") in valid_source_ids_set
     ][:15]
+
+    if not trimmed_findings or not trimmed_source_index:
+        final_content = _render_fallback_report(state)
+        emit("write", final_content)
+        return {"draft": final_content, "final": final_content, "messages": []}
     
     
     prompt = (
+        "Default length: 800-1500 Chinese characters unless the user explicitly asks for a long-form report. Keep high information density and avoid filler.\n"
+        f"当前日期：{date.today().isoformat()}；当前年份：{date.today().year}。如用户要求当前、最新、近期或市面上，报告标题和正文必须面向当前年份，禁止无来源地写成 2024/2025。\n"
         "请严格根据以下信息撰写最终的 Markdown 研报。请直接输出正文，绝对不要输出任何 JSON 结构，也不要复述你的指令。\n\n"
         f"核心问题：{state['query']}\n"
         f"子问题拆解：{json.dumps(state.get('sub_questions', []), ensure_ascii=False)}\n\n"

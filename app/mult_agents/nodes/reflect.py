@@ -1,4 +1,5 @@
 import json, logging
+from datetime import date
 from langchain_core.messages import HumanMessage
 from ..state import ResearchState
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
@@ -17,6 +18,7 @@ def reflect_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     }
     
     prompt = (
+        f"当前日期：{date.today().isoformat()}；当前年份：{date.today().year}。如原问题要求当前、最新、近期或市面上，补搜词必须面向当前年份和近12个月。\n\n"
         f"分析师指出当前证据不足以完全回答问题，存在以下信息缺口：\n{json.dumps(missing_gaps, ensure_ascii=False)}\n\n"
         f"原问题：{state['query']}\n"
         f"子问题：{json.dumps(state.get('sub_questions', []), ensure_ascii=False)}\n"

@@ -4,6 +4,55 @@ from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, lo
 
 logger = logging.getLogger('mult_agents')
 
+
+def _looks_like_simple_arithmetic_query(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    normalized = stripped.lower()
+    normalized = re.sub(r"^(answer only|calculate)\s*:?\s*", "", normalized)
+    normalized = re.sub(r"^(what is|what's)\s+", "", normalized)
+    normalized = re.sub(r"^(please\s+)?compute\s+", "", normalized)
+    normalized = re.sub(r"^(请计算|计算|算一下|帮我算一下)\s*[:：]?\s*", "", normalized)
+    normalized = normalized.replace("等于多少", "").replace("是多少", "")
+    normalized = normalized.strip().rstrip("=?？。")
+    if not normalized:
+        return False
+    if not re.fullmatch(r"[0-9\s+\-*/%().]+", normalized):
+        return False
+    return any(op in normalized for op in "+-*/%")
+
+
+def is_confident_direct_query(query: str) -> bool:
+    """Return True when routing can be decided without an LLM call."""
+    stripped = query.strip()
+    q = stripped.lower()
+    if not q:
+        return True
+    if _looks_like_simple_arithmetic_query(stripped):
+        return True
+
+    direct_patterns = [
+        r'^(hi|hello|hey)\b',
+        r'^who are you\b',
+        r'^what can you do\b',
+        r'^(thanks|thank you|thx)\b',
+        r'^(bye|goodbye)\b',
+        r'^weather\b',
+        r'^what time\b',
+        r'^calculate\s',
+        r'^translate\b',
+    ]
+    if any(re.search(pattern, q) for pattern in direct_patterns):
+        return True
+
+    direct_cn = [
+        "你好", "您好", "谢谢", "再见", "你是谁", "你能做什么",
+        "介绍一下你自己", "天气", "时间", "日期", "现在几点",
+    ]
+    return len(stripped) <= 12 and any(token in stripped for token in direct_cn)
+
+
 def detect_intent(query: str) -> str:
     """Rule-based intent detection. Fast path: skip LLM when confident.
 
@@ -13,6 +62,8 @@ def detect_intent(query: str) -> str:
     """
     q = query.strip()
     if not q:
+        return "direct"
+    if _looks_like_simple_arithmetic_query(q):
         return "direct"
 
     # ---- Direct (simple) signals (ASCII-safe patterns) ----
@@ -190,6 +241,9 @@ def intent_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     if rule_route == "multiagent":
         logger.info("%s ??: multiagent (????? LLM)", colorize("[intent]", "green"))
         return {"intent": "multiagent", "draft": "", "messages": []}
+    if rule_route == "direct" and is_confident_direct_query(state["query"]):
+        logger.info("%s route: direct (confident rule, skip LLM)", colorize("[intent]", "green"))
+        return {"intent": "direct", "draft": "", "messages": []}
     # Only call LLM for ambiguous cases (rule says direct but might be wrong)
     prompt = (
         f"?????{state['query']}\n"

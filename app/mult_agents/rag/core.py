@@ -15,7 +15,7 @@ from typing import Iterable, Optional
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
-from pymilvus import connections, utility
+from pymilvus import Collection, connections, utility
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +321,7 @@ class RAGSystem:
         enable_hybrid=None, enable_rerank=None, enable_cache=None,
     ):
         """Full RAG pipeline: cache -> rewrite -> hybrid -> RRF -> rerank -> expand."""
-        if not utility.has_collection(self.config.collection_name):
+        if not utility.has_collection(self.config.collection_name, using=self._connection_alias):
             logger.warning("Collection %s does not exist", self.config.collection_name)
             return []
 
@@ -393,6 +393,10 @@ class RAGSystem:
             docs = self._chunk_markdown(text, base_meta)
         else:
             docs = self.text_splitter.create_documents([text], metadatas=[base_meta])
+            total = len(docs)
+            for idx, doc in enumerate(docs):
+                doc.metadata["chunk_index"] = idx
+                doc.metadata["total_chunks"] = total
 
         return self.add_documents(docs)
 
@@ -447,12 +451,20 @@ class RAGSystem:
 
     def get_collection_stats(self):
         try:
-            if not utility.has_collection(self.config.collection_name):
+            if not utility.has_collection(self.config.collection_name, using=self._connection_alias):
                 return {"exists": False, "collection": self.config.collection_name}
+            num_entities = None
+            try:
+                collection = Collection(self.config.collection_name, using=self._connection_alias)
+                collection.flush()
+                num_entities = collection.num_entities
+            except Exception:
+                num_entities = None
             return {
                 "exists": True, "collection": self.config.collection_name,
                 "backend": _MILVUS_BACKEND,
                 "host": self.config.milvus_host, "port": self.config.milvus_port,
+                "num_entities": num_entities,
             }
         except Exception as exc:
             return {"error": str(exc)}
@@ -677,9 +689,7 @@ class RAGSystem:
 
     def _ingest_pdf(self, path):
         try:
-            import pypdf
-            reader = pypdf.PdfReader(str(path))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            text = self._extract_pdf_text(path.read_bytes())
         except ImportError:
             logger.warning("pypdf not installed: %s", path)
             return 0
@@ -690,9 +700,7 @@ class RAGSystem:
 
     def _ingest_docx(self, path):
         try:
-            import docx
-            doc = docx.Document(str(path))
-            text = "\n".join(p.text for p in doc.paragraphs if p.text)
+            text = self._extract_docx_text(path.read_bytes())
         except ImportError:
             logger.warning("python-docx not installed: %s", path)
             return 0
@@ -703,9 +711,7 @@ class RAGSystem:
 
     def _ingest_pdf_bytes(self, content, filename, metadata=None):
         try:
-            import pypdf, io
-            reader = pypdf.PdfReader(io.BytesIO(content))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            text = self._extract_pdf_text(content)
         except ImportError:
             logger.warning("pypdf not installed")
             return 0
@@ -716,9 +722,7 @@ class RAGSystem:
 
     def _ingest_docx_bytes(self, content, filename, metadata=None):
         try:
-            import docx, io
-            doc = docx.Document(io.BytesIO(content))
-            text = "\n".join(p.text for p in doc.paragraphs if p.text)
+            text = self._extract_docx_text(content)
         except ImportError:
             logger.warning("python-docx not installed")
             return 0
@@ -726,6 +730,28 @@ class RAGSystem:
             logger.error("DOCX bytes extraction failed: %s", exc)
             return 0
         return self.ingest_text(text, source=filename, metadata=metadata, doc_type="text")
+
+    @staticmethod
+    def _extract_pdf_text(content):
+        import io
+        import pypdf
+
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+
+    @staticmethod
+    def _extract_docx_text(content):
+        import io
+        import docx
+
+        doc = docx.Document(io.BytesIO(content))
+        parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts).strip()
 
     # === Internal: Utilities ===
 

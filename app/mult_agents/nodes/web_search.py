@@ -10,6 +10,21 @@ from .deep_dive import _dedupe_sources, _is_official_domain
 
 logger = logging.getLogger('mult_agents')
 
+
+def _resolve_search_node_timeout(config) -> float:
+    from os import getenv
+
+    override = getenv("SEARCH_NODE_TIMEOUT", "").strip()
+    if override:
+        try:
+            return max(1.0, float(override))
+        except ValueError:
+            logger.warning("Invalid SEARCH_NODE_TIMEOUT=%s, using derived timeout", override)
+    fetch_budget = config.fetch_timeout if getattr(config, "fetch_enabled", True) else 0.0
+    rewrite_budget = 6.0 if getattr(config, "rewrite_enabled", False) else 2.0
+    return max(3.0, min(float(config.request_timeout) + float(fetch_budget) + rewrite_budget, 25.0))
+
+
 def _is_bad_web_domain(domain: str) -> bool:
     value = domain.lower()
     blocked = ["datasheet", "bdtic", "doc88", "elecfans", "down"]
@@ -32,6 +47,30 @@ def _filter_web_records(query: str, records: list[dict]) -> tuple[list[dict], di
             stats["dropped_domain"] += 1
             continue
         relevance = _estimate_relevance(query, f"{title}\n{snippet}")
+        record["relevance_score"] = relevance
+        if relevance < 0.2 and not _is_official_domain(domain):
+            stats["dropped_irrelevant"] += 1
+            continue
+        kept.append(record)
+    stats["kept_count"] = len(kept)
+    return kept, stats
+
+
+def _filter_web_records_any(queries: list[str], records: list[dict]) -> tuple[list[dict], dict]:
+    kept = []
+    stats = {"raw_count": len(records), "kept_count": 0, "dropped_irrelevant": 0, "dropped_domain": 0, "dropped_empty": 0}
+    query_texts = [q for q in queries if str(q).strip()] or [""]
+    for record in records:
+        title = str(record.get("title", ""))
+        snippet = str(record.get("snippet", ""))
+        domain = str(record.get("domain", ""))
+        if not title and not snippet:
+            stats["dropped_empty"] += 1
+            continue
+        if _is_bad_web_domain(domain):
+            stats["dropped_domain"] += 1
+            continue
+        relevance = max(_estimate_relevance(q, f"{title}\n{snippet}") for q in query_texts)
         record["relevance_score"] = relevance
         if relevance < 0.2 and not _is_official_domain(domain):
             stats["dropped_irrelevant"] += 1
@@ -83,23 +122,28 @@ def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchSta
 
     # ?? Parallel search with enterprise engine ??
     from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-    from ..search import search as enterprise_search
+    from ..search import get_search_config, search as enterprise_search
 
     all_raw_records: list[dict] = []
+    tenant_id = str(state.get("tenant_id", "default_tenant") or "default_tenant")
     query_index_map: dict[str, int] = {}
     for idx, item in enumerate(queries, 1):
         qtext = str(item.get("query", ""))
         if qtext:
             query_index_map[qtext] = idx
 
-    search_timeout = 45.0
-    with ThreadPoolExecutor(max_workers=min(len(query_texts), 6)) as executor:
+    search_config = get_search_config()
+    search_timeout = _resolve_search_node_timeout(search_config)
+    with ThreadPoolExecutor(max_workers=max(1, min(len(query_texts), 6))) as executor:
         futures = {}
         for qtext in query_texts:
             futures[executor.submit(
                 enterprise_search, qtext,
-                enable_cache=True, enable_rewrite=True,
-                enable_fetch=True, enable_rerank=True
+                enable_cache=search_config.cache_enabled,
+                enable_rewrite=search_config.rewrite_enabled,
+                enable_fetch=search_config.fetch_enabled,
+                enable_rerank=True,
+                tenant_id=tenant_id,
             )] = qtext
 
         try:
@@ -137,8 +181,7 @@ def web_search_node(state: ResearchState, agent, agent_name: str) -> ResearchSta
     all_raw_records = _minimal_record_filter(all_raw_records, ["title", "snippet", "url"])
 
     # ?? Programmatic pre-filter before LLM ??
-    for qtext in query_texts:
-        all_raw_records, _ = _filter_web_records(qtext, all_raw_records)
+    all_raw_records, filter_stats = _filter_web_records_any(query_texts, all_raw_records)
 
     logger.info("[web_search_node] ????? | ????????=%s", len(all_raw_records))
 

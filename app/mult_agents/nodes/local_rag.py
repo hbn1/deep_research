@@ -66,7 +66,11 @@ def local_rag_node(state: ResearchState, agent, agent_name: str) -> ResearchStat
     prefix = f"LOC{iteration+1}"
     
     for query_index, item in enumerate(queries, 1):
-        records = search_knowledge_base_records(str(item.get("query", "")), limit=4)
+        records = search_knowledge_base_records(
+            str(item.get("query", "")),
+            limit=4,
+            tenant_id=str(state.get("tenant_id", "default_tenant")),
+        )
         records = _assign_source_ids(records, f"{prefix}_{query_index}")
         for record in records:
             record["section_id"] = item.get("section_id")

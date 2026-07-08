@@ -38,7 +38,10 @@ async def stream_research(
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> StreamingResponse:
     async def event_stream():
-        start_event = {"type": "status", "message": "任务已接收，正在初始化多智能体链路"}
+        start_event = {
+            "type": "status",
+            "message": "Research task received; initializing workflow.",
+        }
         yield f"data: {json.dumps(start_event, ensure_ascii=False)}\n\n"
         async for event in workflow_service.stream_events(
             query=payload.query,

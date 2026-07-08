@@ -1,0 +1,258 @@
+name: deepresearch-prod
+
+services:
+  frontend:
+    build:
+      context: ./front/agent_front
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
+        VITE_ENABLE_ADMIN_TOOLS: ${VITE_ENABLE_ADMIN_TOOLS:-false}
+    environment:
+      API_AUTH_KEY: ${API_AUTH_KEY:?Set API_AUTH_KEY}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-25m}
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
+    environment:
+      APP_ENV: production
+      API_AUTH_KEY: ${API_AUTH_KEY:?Set API_AUTH_KEY}
+      API_AUTH_REQUIRED: "true"
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY}
+      ADMIN_API_REQUIRED: "true"
+      API_DOCS_ENABLED: "false"
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-deepresearch-prod}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TAGS: ${LANGSMITH_TAGS:-production,deepresearch}
+      LANGSMITH_ENVIRONMENT: ${LANGSMITH_ENVIRONMENT:-production}
+      LANGSMITH_SAMPLE_RATE: ${LANGSMITH_SAMPLE_RATE:-1.0}
+      LANGSMITH_HIDE_INPUTS: ${LANGSMITH_HIDE_INPUTS:-false}
+      LANGSMITH_HIDE_OUTPUTS: ${LANGSMITH_HIDE_OUTPUTS:-false}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:?Set CORS_ALLOW_ORIGINS}
+      TRUSTED_PROXY_HEADERS: "true"
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_BACKEND: redis
+      RATE_LIMIT_REDIS_URL: redis://redis:6379/1
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-60}
+      RAG_UPLOAD_DIR: /data/rag_uploads
+      RAG_MAX_UPLOAD_MB: ${RAG_MAX_UPLOAD_MB:-25}
+      RAG_MAX_TENANT_STORAGE_MB: ${RAG_MAX_TENANT_STORAGE_MB:-512}
+      RAG_ALLOWED_EXTENSIONS: ${RAG_ALLOWED_EXTENSIONS:-.pdf,.docx}
+      RAG_VALIDATE_FILE_SIGNATURES: "true"
+      EVAL_DATASETS_DIR: /app/eval_datasets
+      EVAL_RESULTS_DIR: /data/eval_results
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-mult_agent_memory}
+      ENABLE_MILVUS: "true"
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?Set DASHSCOPE_API_KEY}
+      DASHSCOPE_HTTP_BASE_URL: ${DASHSCOPE_HTTP_BASE_URL:?Set DASHSCOPE_HTTP_BASE_URL}
+      DASHSCOPE_WEBSOCKET_BASE_URL: ${DASHSCOPE_WEBSOCKET_BASE_URL:?Set DASHSCOPE_WEBSOCKET_BASE_URL}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:?Set OPENAI_BASE_URL}
+      BOCHA_API_KEY: ${BOCHA_API_KEY:-}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MODEL: ${MODEL:-qwen-plus}
+      SMALL_MODEL: ${SMALL_MODEL:-qwen-turbo}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-qwen-plus}
+      NODE_MODEL_OVERRIDES: ${NODE_MODEL_OVERRIDES:-}
+      THREAD_ID: ${THREAD_ID:-default}
+      USER_ID: ${USER_ID:-default_user}
+      TENANT_ID: ${TENANT_ID:-default_tenant}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
+      ENABLE_MEMORY: ${ENABLE_MEMORY:-true}
+      SHORT_TERM_BACKEND: ${SHORT_TERM_BACKEND:-redis}
+      LONG_TERM_BACKEND: ${LONG_TERM_BACKEND:-postgres}
+      LONG_TERM_SCOPE: ${LONG_TERM_SCOPE:-user}
+      CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-auto}
+      SEARCH_BACKENDS: ${SEARCH_BACKENDS:-bocha}
+      SEARCH_FALLBACK_BACKENDS: ${SEARCH_FALLBACK_BACKENDS:-tavily}
+      SEARCH_COUNT: ${SEARCH_COUNT:-3}
+      SEARCH_TIMEOUT: ${SEARCH_TIMEOUT:-8}
+      SEARCH_FETCH_TIMEOUT: ${SEARCH_FETCH_TIMEOUT:-4}
+      SEARCH_MAX_WORKERS: ${SEARCH_MAX_WORKERS:-4}
+      SEARCH_MAX_FETCH_PAGES: ${SEARCH_MAX_FETCH_PAGES:-3}
+      SEARCH_CACHE_ENABLED: ${SEARCH_CACHE_ENABLED:-true}
+      SEARCH_CACHE_TTL_SECONDS: ${SEARCH_CACHE_TTL_SECONDS:-3600}
+      SEARCH_CACHE_MAX_ENTRIES: ${SEARCH_CACHE_MAX_ENTRIES:-1024}
+      SEARCH_REWRITE_ENABLED: ${SEARCH_REWRITE_ENABLED:-false}
+      SEARCH_FETCH_ENABLED: ${SEARCH_FETCH_ENABLED:-true}
+    expose:
+      - "8000"
+    volumes:
+      - rag_uploads:/data/rag_uploads
+      - eval_results:/data/eval_results
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+    expose:
+      - "5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  milvus:
+    image: milvusdb/milvus:v2.5.7
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    expose:
+      - "19530"
+      - "9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9091/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command:
+      [
+        "etcd",
+        "--advertise-client-urls=http://etcd:2379",
+        "--listen-client-urls=http://0.0.0.0:2379",
+        "--data-dir=/etcd",
+      ]
+    expose:
+      - "2379"
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "etcdctl",
+          "--endpoints=http://127.0.0.1:2379",
+          "endpoint",
+          "health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - deepresearch
+
+volumes:
+  rag_uploads:
+  eval_results:
+  redis_data:
+  pg_data:
+  milvus_data:
+  etcd_data:
+  minio_data:
+
+networks:
+  deepresearch:
+    driver: bridge

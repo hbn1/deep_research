@@ -1,0 +1,2 @@
+{"id":"smoke_direct_intro","query":"hello, introduce yourself in one short paragraph.","category":"smoke","expected_route":"direct","forbidden_claims":["2024 is the current year"],"max_latency_ms":60000,"score_threshold":60}
+{"id":"smoke_agent_compare","query":"LangGraph vs CrewAI: compare architecture, use cases, and tradeoffs with sources.","category":"web_research","expected_route":"multiagent","required_keywords":["LangGraph","CrewAI"],"min_evidence_count":1,"min_citations":1,"max_iterations":1,"max_latency_ms":180000,"score_threshold":65}

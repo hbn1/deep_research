@@ -56,6 +56,8 @@ def analyze_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
     needs_more_research = payload.get("needs_more_research", False)
     missing_gaps = payload.get("missing_gaps", [])
     missing_info_weight = int(payload.get("missing_info_weight", 5))
+    if needs_more_research and not findings:
+        missing_info_weight = max(missing_info_weight, 9)
     analysis_summary = payload.get("analysis_summary", content)
     return {
         "analysis": analysis_summary,

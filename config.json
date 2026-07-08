@@ -1,19 +1,21 @@
-﻿{
-    "model": "qwen3.6-plus",
-    "small_model": "qwen-turbo",
-    "max_iterations": 3,
-    "search_backends": "bocha",
-    "search_fallback_backends": "serper,tavily",
-    "search_count": 4,
-    "search_timeout": 15,
-    "search_fetch_timeout": 8,
-    "search_max_workers": 6,
-    "search_cache_enabled": true,
-    "search_cache_ttl_seconds": 3600,
-    "search_rewrite_enabled": false,
-    "search_fetch_enabled": true,
-    "node_model_overrides": {
-        "direct_responder": "qwen-turbo",
-        "intent_router": "qwen-turbo"
-                             }
+{
+  "model": "qwen-plus",
+  "small_model": "qwen-turbo",
+  "max_iterations": 3,
+  "search_backends": "bocha",
+  "search_fallback_backends": "tavily",
+  "search_count": 3,
+  "search_timeout": 8,
+  "search_fetch_timeout": 4,
+  "search_max_workers": 4,
+  "search_max_fetch_pages": 3,
+  "search_cache_enabled": true,
+  "search_cache_ttl_seconds": 3600,
+  "search_cache_max_entries": 1024,
+  "search_rewrite_enabled": false,
+  "search_fetch_enabled": true,
+  "node_model_overrides": {
+    "direct_responder": "qwen-turbo",
+    "intent_router": "qwen-turbo"
+  }
 }

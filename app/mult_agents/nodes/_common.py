@@ -138,6 +138,51 @@ def _prune_evidence_to_allowed_sources(evidence: list[dict], allowed_source_ids:
 
 
 def _extract_query_terms(query: str) -> list[str]:
+    lowered = query.lower()
+    terms: list[str] = []
+    phrase_hints = []
+    if "agent" in lowered:
+        phrase_hints.append("agent")
+    if "智能体" in query:
+        phrase_hints.append("智能体")
+    if "人工智能" in query:
+        phrase_hints.append("人工智能")
+
+    generic_fragments = [
+        "写一份", "当前", "市面上", "最新", "现在", "当下", "近期", "最近",
+        "今年", "分析报告", "调研报告", "研究报告", "分析", "报告", "的",
+    ]
+    stopwords = {
+        "什么", "如何", "以及", "一个", "关于", "这个", "那个", "进行", "基于",
+        "附带", "来源", "清单", "当前", "最新", "现在", "当下", "近期", "最近",
+        "今年", "市面上", "分析", "报告", "写一份", "生成", "调研", "研究",
+        "latest", "current", "recent", "today", "overview", "comparison",
+        "performance", "best", "practices",
+    }
+
+    for hint in phrase_hints:
+        if hint not in terms:
+            terms.append(hint)
+
+    for part in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_-]{3,}", lowered):
+        if re.fullmatch(r"[A-Za-z0-9_-]{3,}", part):
+            if part not in stopwords and part not in terms:
+                terms.append(part)
+            continue
+        cleaned = part
+        for fragment in generic_fragments:
+            cleaned = cleaned.replace(fragment, " ")
+        sub_terms = re.findall(r"[\u4e00-\u9fff]{2,}", cleaned)
+        if not sub_terms and cleaned.strip():
+            sub_terms = [part]
+        for sub_term in sub_terms:
+            if sub_term in stopwords:
+                continue
+            if sub_term not in terms:
+                terms.append(sub_term)
+    if terms:
+        return terms[:12]
+
     parts = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_-]{3,}", query.lower())
     terms = []
     stopwords = {"什么", "如何", "以及", "一个", "关于", "这个", "那个", "进行", "基于", "附带", "来源", "清单"}

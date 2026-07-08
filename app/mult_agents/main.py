@@ -32,6 +32,7 @@ from .utils import colorize, emit, collect_tool_calls, with_memory_context, log_
 from .memory import MemoryManager, ProceduralMemoryStore, MemoryExtractor
 from .tools import init_rag_system, init_search_from_config
 from .rag.core import RAGConfig
+from observability.langsmith import configure_langsmith
 
 logger = logging.getLogger("mult_agents")
 
@@ -50,6 +51,27 @@ class AgentBundle:
     writer: any
 
 
+def configure_dashscope_endpoint(config: AppConfig) -> None:
+    """Apply a custom DashScope workspace endpoint before SDK clients are built."""
+    http_base = str(getattr(config, "dashscope_http_base_url", "") or "").strip().rstrip("/")
+    websocket_base = str(getattr(config, "dashscope_websocket_base_url", "") or "").strip().rstrip("/")
+    if http_base:
+        os.environ["DASHSCOPE_HTTP_BASE_URL"] = http_base
+    if websocket_base:
+        os.environ["DASHSCOPE_WEBSOCKET_BASE_URL"] = websocket_base
+    if not http_base and not websocket_base:
+        return
+    try:
+        import dashscope
+        if http_base:
+            dashscope.base_http_api_url = http_base
+        if websocket_base:
+            dashscope.base_websocket_api_url = websocket_base
+        logger.info("DashScope endpoint configured | http_base=%s", http_base or "default")
+    except Exception as exc:
+        logger.warning("DashScope endpoint configuration failed: %s", exc)
+
+
 def build_agent(model: str, api_key: str, prompt_key: str, temperature: float, tools: list):
     llm = ChatTongyi(model=model, temperature=temperature, dashscope_api_key=api_key or None)
     prompt = PROMPTS[prompt_key]
@@ -64,10 +86,9 @@ def build_agent(model: str, api_key: str, prompt_key: str, temperature: float, t
 
 
 def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
-    # LangSmith / OpenTelemetry tracing (zero-cost when disabled)
-    if os.getenv("LANGCHAIN_TRACING_V2") == "true":
-        os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGCHAIN_PROJECT", "deep-research"))
-        logger.info("LangSmith tracing enabled | project=%s", os.environ["LANGCHAIN_PROJECT"])
+    configure_dashscope_endpoint(config)
+
+    configure_langsmith()
 
     if getattr(config, "enable_milvus", False):
         rag_config = RAGConfig(
@@ -82,30 +103,36 @@ def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
         api_key=api_key,
         serper_api_key=config.serper_api_key,
         tavily_api_key=config.tavily_api_key,
+        bocha_api_key=config.bocha_api_key,
         search_backends=config.search_backends,
         search_fallback_backends=config.search_fallback_backends,
         search_count=config.search_count,
         search_timeout=config.search_timeout,
         search_fetch_timeout=config.search_fetch_timeout,
         search_max_workers=config.search_max_workers,
+        search_max_fetch_pages=config.search_max_fetch_pages,
         search_cache_enabled=config.search_cache_enabled,
         search_cache_ttl_seconds=config.search_cache_ttl_seconds,
+        search_cache_max_entries=config.search_cache_max_entries,
         search_rewrite_enabled=config.search_rewrite_enabled,
         search_fetch_enabled=config.search_fetch_enabled,
     )
     small_model = config.small_model
     node_overrides_raw = config.node_model_overrides
     node_overrides: dict = {}
-    if isinstance(node_overrides_raw, str) and node_overrides_raw.strip():
+    if isinstance(node_overrides_raw, dict):
+        node_overrides = node_overrides_raw
+    elif isinstance(node_overrides_raw, str) and node_overrides_raw.strip():
         try:
             node_overrides = json.loads(node_overrides_raw)
         except json.JSONDecodeError:
+            logger.warning("NODE_MODEL_OVERRIDES is not valid JSON, ignoring it")
             node_overrides = {}
-    default_small_nodes = {"direct_responder", "intent_router"}
+    default_small_nodes = {"direct_responder", "intent_router", "planner", "analyst"}
 
     def _agent_model(node_name: str) -> str:
         if node_name in node_overrides:
-            return node_overrides[node_name]
+            return str(node_overrides[node_name])
         if node_name in default_small_nodes:
             return small_model
         return model

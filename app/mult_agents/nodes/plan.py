@@ -1,4 +1,5 @@
 import json, logging, re
+from datetime import date
 from langchain_core.messages import HumanMessage
 from ..state import ResearchState
 from ..utils import (colorize, emit, collect_tool_calls, with_memory_context, log_inputs, invoke_json_agent, _last_content, _load_json)
@@ -6,6 +7,64 @@ from ._common import _extract_query_terms, _estimate_relevance
 from .deep_dive import _dedupe_sources
 
 logger = logging.getLogger('mult_agents')
+
+_CURRENT_QUERY_MARKERS = (
+    "当前", "最新", "现在", "当下", "近期", "最近", "今年", "市面上", "现状",
+    "current", "latest", "recent", "today", "up-to-date",
+)
+
+
+def _current_year() -> int:
+    return date.today().year
+
+
+def _current_date_text() -> str:
+    return date.today().isoformat()
+
+
+def _user_specified_year(query: str) -> bool:
+    return bool(re.search(r"20\d{2}", query))
+
+
+def _needs_current_context(query: str) -> bool:
+    lowered = query.lower()
+    return any(marker in lowered for marker in _CURRENT_QUERY_MARKERS)
+
+
+def _augment_query_with_current_context(query: str) -> str:
+    if not _needs_current_context(query):
+        return query
+    return (
+        f"{query}\n\n"
+        f"当前日期：{_current_date_text()}；当前年份：{_current_year()}。"
+        "如果用户要求“当前、最新、现在、当下、今年、近期、市面上、现状”，"
+        "规划、子问题和搜索词必须面向当前年份和近 12 个月，"
+        "除非用户显式指定旧年份，否则禁止把任务改写成 2024 或其他过去年份。"
+    )
+
+
+def _normalize_current_text(value: str, user_query: str) -> str:
+    if not _needs_current_context(user_query) or _user_specified_year(user_query):
+        return value
+    current = _current_year()
+
+    def _replace_year(match: re.Match) -> str:
+        year = int(match.group(0))
+        if 2020 <= year < current:
+            return str(current)
+        return match.group(0)
+
+    return re.sub(r"20\d{2}", _replace_year, value)
+
+
+def _normalize_current_payload(value, user_query: str):
+    if isinstance(value, str):
+        return _normalize_current_text(value, user_query)
+    if isinstance(value, list):
+        return [_normalize_current_payload(item, user_query) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_current_payload(item, user_query) for key, item in value.items()}
+    return value
 
 def _default_plan(state: ResearchState) -> dict:
     return {
@@ -33,9 +92,11 @@ def _default_plan(state: ResearchState) -> dict:
 
 def _guess_primary_entity(query: str) -> str:
     lowered = query.lower()
+    if "agent" in lowered or "智能体" in query:
+        return "Agent智能体"
     ascii_terms = re.findall(r"[a-z][a-z0-9_-]{2,}", lowered)
     for term in ascii_terms:
-        if term not in {"latest", "trend", "news", "agent", "open", "using"}:
+        if term not in {"latest", "trend", "news", "open", "using", "current", "recent"}:
             return term
     chinese_terms = re.findall(r"[\u4e00-\u9fff]{2,}", query)
     for term in chinese_terms:
@@ -56,13 +117,27 @@ def _derive_direct_search_queries(query: str) -> list[str]:
     if not base_query:
         return []
     entity = _guess_primary_entity(base_query)
-    candidates = [base_query]
+    current_year = _current_year()
+    lowered = base_query.lower()
+    candidates = []
+    if _needs_current_context(base_query):
+        if "agent" in lowered or "智能体" in base_query:
+            candidates.extend([
+                f"{current_year} Agent 智能体 市场 最新趋势",
+                f"{current_year} AI Agent platforms enterprise adoption LangChain AutoGen CrewAI OpenAI Agents SDK",
+                f"{current_year} Agent 智能体 企业落地 案例 产品 对比",
+            ])
+        elif entity:
+            candidates.extend([
+                f"{current_year} {entity} 最新趋势 现状",
+                f"{current_year} {entity} 市场 对比 分析",
+            ])
+    candidates.append(base_query)
     if entity and len(entity) >= 3:
         # Generate clean, language-appropriate search variants
         candidates.extend([
-            f"{entity} overview",
-            f"{entity} comparison",
-            f"{entity} performance",
+            f"{current_year} {entity} 最新 overview",
+            f"{current_year} {entity} comparison",
             f"{entity} best practices",
         ])
     # Deduplicate preserving order
@@ -98,6 +173,8 @@ def _derive_search_plan(outline: list[dict], sub_questions: list[str], _research
                 "reason": "围绕用户原始问题生成的直接检索词",
             }
         )
+    if _needs_current_context(query):
+        return _dedupe_sources(plan, ["query"])[:3]
     for section in outline:
         if not isinstance(section, dict):
             continue
@@ -116,7 +193,7 @@ def _derive_search_plan(outline: list[dict], sub_questions: list[str], _research
     if not plan:
         plan.append({"section_id": "sec_1", "query": query, "source_preference": "hybrid", "reason": "fallback"})
     deduped = _dedupe_sources(plan, ["query"])
-    return deduped[:6]
+    return deduped[:4]
 
 
 
@@ -153,7 +230,7 @@ def _build_queries(state: ResearchState, source_preference: str) -> list[dict]:
             "source_preference": source_preference,
             "reason": "fallback",
         })
-    return queries[:6]
+    return queries[:4]
 
 
 
@@ -184,6 +261,7 @@ def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         }
     
     fallback = _default_plan(state)
+    query = _augment_query_with_current_context(query)
     payload, content, messages = invoke_json_agent(
         state,
         f"?????{query}\n???????????????? JSON?",
@@ -192,6 +270,7 @@ def plan_node(state: ResearchState, agent, agent_name: str) -> ResearchState:
         "plan",
         fallback,
     )
+    payload = _normalize_current_payload(payload, state["query"])
     outline = payload.get("outline") if isinstance(payload.get("outline"), list) else fallback["outline"]
     sub_questions = payload.get("sub_questions") if isinstance(payload.get("sub_questions"), list) else fallback["sub_questions"]
     research_questions = payload.get("research_questions") if isinstance(payload.get("research_questions"), list) else fallback["research_questions"]

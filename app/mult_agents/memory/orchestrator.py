@@ -7,6 +7,7 @@ Stateless. Coordinates:
 """
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Optional, Set
 
@@ -46,11 +47,13 @@ class MemoryOrchestrator:
         long_term: UnifiedMemoryStore,
         extractor: MemoryExtractor,
         injector: Optional[MemoryInjector] = None,
+        summary_threshold: int = 20,
     ):
         self._st = short_term
         self._lt = long_term
         self._extractor = extractor
         self._injector = injector or MemoryInjector()
+        self._summary_threshold = max(int(summary_threshold or 20), 2)
         # Guard against concurrent summary generation for the same thread
         self._summarizing: Set[str] = set()
 
@@ -116,24 +119,30 @@ class MemoryOrchestrator:
 
         # 2. Long-term: LLM extraction (fire-and-forget, non-blocking)
         try:
-            extracted = await self._extractor.extract_from_turn(query, answer)
+            extract_fn = self._extractor.extract_from_turn
+            if inspect.iscoroutinefunction(extract_fn):
+                extracted = await extract_fn(query, answer)
+            else:
+                extracted = await asyncio.to_thread(extract_fn, query, answer)
         except Exception as exc:
             logger.warning("Memory extraction failed (non-critical): %s", exc)
             extracted = {"facts": [], "preferences": [], "constraints": [], "procedural": []}
 
         # 3. Save extracted entries in parallel
-        tasks = []
-        for fact in extracted.get("facts", []):
-            tasks.append(self._lt.save(MemoryEntry(
-                content=fact,
-                memory_type=MemoryType.SEMANTIC,
-                user_id=user_id,
-                namespace="facts",
-                importance=extracted.get("importance", 0.6),
-                metadata={"tenant_id": tenant_id, "source": "extractor"},
-            )))
+        entries = []
+        for namespace in ("facts", "preferences", "constraints"):
+            for item in extracted.get(namespace, []):
+                entries.append(MemoryEntry(
+                    content=item,
+                    memory_type=MemoryType.SEMANTIC,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    namespace=namespace,
+                    importance=extracted.get("importance", 0.6),
+                    metadata={"tenant_id": tenant_id, "source": "extractor"},
+                ))
         for pat in extracted.get("procedural", []):
-            tasks.append(self._lt.save(MemoryEntry(
+            entries.append(MemoryEntry(
                 content={
                     "trigger": str(pat.get("trigger", "")),
                     "action": str(pat.get("action", "")),
@@ -145,16 +154,19 @@ class MemoryOrchestrator:
                 namespace="patterns",
                 importance=0.5,
                 metadata={"tenant_id": tenant_id},
-            )))
+            ))
 
-        if tasks:
-            await asyncio.gather(*tasks)
+        if entries:
+            save_batch = getattr(self._lt, "save_batch", None)
+            if save_batch is not None:
+                await save_batch(entries)
+            else:
+                await asyncio.gather(*(self._lt.save(entry) for entry in entries))
 
         # 4. Trigger summary if threshold reached (with atomic guard)
         summary_key = f"{tenant_id}:{user_id}:{thread_id}"
         count = self._st.message_count(tenant_id, user_id, thread_id)
-        summary_threshold = 20
-        if (count >= summary_threshold
+        if (count >= self._summary_threshold
                 and not self._st.has_summary(tenant_id, user_id, thread_id)
                 and summary_key not in self._summarizing):
             self._summarizing.add(summary_key)
@@ -208,6 +220,15 @@ class MemoryOrchestrator:
             logger.warning("[summary] generation failed (non-critical): %s", exc)
         finally:
             self._summarizing.discard(summary_key)
+
+    async def close(self) -> None:
+        """Close owned long-term resources when the hosting app shuts down."""
+        close = getattr(self._lt, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 def _langchainify(messages: list[dict]) -> list:

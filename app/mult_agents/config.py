@@ -41,19 +41,24 @@ class AppConfig:
     # 搜索配置
     serper_api_key: str = ""
     tavily_api_key: str = ""
+    bocha_api_key: str = ""
+    dashscope_http_base_url: str = ""
+    dashscope_websocket_base_url: str = ""
     search_backends: str = "bocha"
-    search_fallback_backends: str = "serper,tavily"
-    search_count: int = 4
-    search_timeout: float = 15.0
-    search_fetch_timeout: float = 8.0
-    search_max_workers: int = 6
+    search_fallback_backends: str = "tavily"
+    search_count: int = 3
+    search_timeout: float = 8.0
+    search_fetch_timeout: float = 4.0
+    search_max_workers: int = 4
+    search_max_fetch_pages: int = 3
     search_cache_enabled: bool = True
     search_cache_ttl_seconds: int = 3600
+    search_cache_max_entries: int = 1024
     search_rewrite_enabled: bool = True
     search_fetch_enabled: bool = True
     # 模型路由：direct / 轻量节点用小模型，multi-agent 核心节点用大模型
     small_model: str = "qwen-turbo"
-    node_model_overrides: str = ""
+    node_model_overrides: str | dict[str, str] = ""
 
     def with_overrides(self, **kwargs) -> "AppConfig":
         cleaned = {k: v for k, v in kwargs.items() if v is not None}
@@ -74,6 +79,18 @@ class AppConfig:
         return default
 
     @staticmethod
+    def _resolve_jsonish(data: dict, field: str, env_key: str, default: str = "") -> str:
+        env_value = os.getenv(env_key)
+        if env_value is not None and str(env_value).strip() != "":
+            return str(env_value).strip()
+        file_value = data.get(field)
+        if isinstance(file_value, (dict, list)):
+            return json.dumps(file_value, ensure_ascii=False)
+        if file_value is not None and str(file_value).strip() != "":
+            return str(file_value).strip()
+        return default
+
+    @staticmethod
     def _resolve_int(data: dict, field: str, env_key: str, default: int) -> int:
         value = AppConfig._resolve_str(data, field, env_key, str(default))
         return int(value)
@@ -86,7 +103,12 @@ class AppConfig:
     @staticmethod
     def _resolve_bool(data: dict, field: str, env_key: str, default: bool) -> bool:
         value = AppConfig._resolve_str(data, field, env_key, "true" if default else "false")
-        return value.lower() == "true"
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
 
     @staticmethod
     def from_file(path: str | Path | None = None) -> "AppConfig":
@@ -132,18 +154,23 @@ class AppConfig:
             milvus_collection=_s("milvus_collection", "MILVUS_COLLECTION", "mult_agent_memory"),
             serper_api_key=_s("serper_api_key", "SERPER_API_KEY"),
             tavily_api_key=_s("tavily_api_key", "TAVILY_API_KEY"),
+            bocha_api_key=_s("bocha_api_key", "BOCHA_API_KEY"),
+            dashscope_http_base_url=_s("dashscope_http_base_url", "DASHSCOPE_HTTP_BASE_URL"),
+            dashscope_websocket_base_url=_s("dashscope_websocket_base_url", "DASHSCOPE_WEBSOCKET_BASE_URL"),
             search_backends=_s("search_backends", "SEARCH_BACKENDS", "bocha"),
-            search_fallback_backends=_s("search_fallback_backends", "SEARCH_FALLBACK_BACKENDS", "serper,tavily"),
-            search_count=_i("search_count", "SEARCH_COUNT", 4),
-            search_timeout=_f("search_timeout", "SEARCH_TIMEOUT", 15.0),
-            search_fetch_timeout=_f("search_fetch_timeout", "SEARCH_FETCH_TIMEOUT", 8.0),
-            search_max_workers=_i("search_max_workers", "SEARCH_MAX_WORKERS", 6),
+            search_fallback_backends=_s("search_fallback_backends", "SEARCH_FALLBACK_BACKENDS", "tavily"),
+            search_count=_i("search_count", "SEARCH_COUNT", 3),
+            search_timeout=_f("search_timeout", "SEARCH_TIMEOUT", 8.0),
+            search_fetch_timeout=_f("search_fetch_timeout", "SEARCH_FETCH_TIMEOUT", 4.0),
+            search_max_workers=_i("search_max_workers", "SEARCH_MAX_WORKERS", 4),
+            search_max_fetch_pages=_i("search_max_fetch_pages", "SEARCH_MAX_FETCH_PAGES", 3),
             search_cache_enabled=_b("search_cache_enabled", "SEARCH_CACHE_ENABLED", True),
             search_cache_ttl_seconds=_i("search_cache_ttl_seconds", "SEARCH_CACHE_TTL_SECONDS", 3600),
+            search_cache_max_entries=_i("search_cache_max_entries", "SEARCH_CACHE_MAX_ENTRIES", 1024),
             search_rewrite_enabled=_b("search_rewrite_enabled", "SEARCH_REWRITE_ENABLED", True),
             search_fetch_enabled=_b("search_fetch_enabled", "SEARCH_FETCH_ENABLED", True),
             small_model=_s("small_model", "SMALL_MODEL", "qwen-turbo"),
-            node_model_overrides=_s("node_model_overrides", "NODE_MODEL_OVERRIDES", ""),
+            node_model_overrides=AppConfig._resolve_jsonish(data, "node_model_overrides", "NODE_MODEL_OVERRIDES", ""),
         )
 
     @staticmethod
@@ -184,14 +211,19 @@ class AppConfig:
             milvus_collection=_s("milvus_collection", "MILVUS_COLLECTION", "mult_agent_memory"),
             serper_api_key=_s("serper_api_key", "SERPER_API_KEY"),
             tavily_api_key=_s("tavily_api_key", "TAVILY_API_KEY"),
+            bocha_api_key=_s("bocha_api_key", "BOCHA_API_KEY"),
+            dashscope_http_base_url=_s("dashscope_http_base_url", "DASHSCOPE_HTTP_BASE_URL"),
+            dashscope_websocket_base_url=_s("dashscope_websocket_base_url", "DASHSCOPE_WEBSOCKET_BASE_URL"),
             search_backends=_s("search_backends", "SEARCH_BACKENDS", "bocha"),
-            search_fallback_backends=_s("search_fallback_backends", "SEARCH_FALLBACK_BACKENDS", "serper,tavily"),
-            search_count=_i("search_count", "SEARCH_COUNT", 4),
-            search_timeout=_f("search_timeout", "SEARCH_TIMEOUT", 15.0),
-            search_fetch_timeout=_f("search_fetch_timeout", "SEARCH_FETCH_TIMEOUT", 8.0),
-            search_max_workers=_i("search_max_workers", "SEARCH_MAX_WORKERS", 6),
+            search_fallback_backends=_s("search_fallback_backends", "SEARCH_FALLBACK_BACKENDS", "tavily"),
+            search_count=_i("search_count", "SEARCH_COUNT", 3),
+            search_timeout=_f("search_timeout", "SEARCH_TIMEOUT", 8.0),
+            search_fetch_timeout=_f("search_fetch_timeout", "SEARCH_FETCH_TIMEOUT", 4.0),
+            search_max_workers=_i("search_max_workers", "SEARCH_MAX_WORKERS", 4),
+            search_max_fetch_pages=_i("search_max_fetch_pages", "SEARCH_MAX_FETCH_PAGES", 3),
             search_cache_enabled=_b("search_cache_enabled", "SEARCH_CACHE_ENABLED", True),
             search_cache_ttl_seconds=_i("search_cache_ttl_seconds", "SEARCH_CACHE_TTL_SECONDS", 3600),
+            search_cache_max_entries=_i("search_cache_max_entries", "SEARCH_CACHE_MAX_ENTRIES", 1024),
             search_rewrite_enabled=_b("search_rewrite_enabled", "SEARCH_REWRITE_ENABLED", True),
             search_fetch_enabled=_b("search_fetch_enabled", "SEARCH_FETCH_ENABLED", True),
             small_model=_s("small_model", "SMALL_MODEL", "qwen-turbo"),

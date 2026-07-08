@@ -11,8 +11,15 @@ from typing import AsyncIterator, Optional
 
 from mult_agents.config import AppConfig
 from mult_agents.graph import build_app as build_workflow_app
-from mult_agents.main import build_agents, build_checkpointer, build_memory_manager
+from mult_agents.main import (
+    build_agents,
+    build_checkpointer,
+    build_memory_manager,
+    configure_dashscope_endpoint,
+)
+from mult_agents.search import close_search_resources
 from mult_agents.state import create_initial_state
+from observability.langsmith import trace_run
 
 logger = logging.getLogger("backend.service")
 
@@ -42,7 +49,9 @@ class WorkflowService:
         self._base_config: AppConfig | None = None
         self._memory_orchestrator = None       # v2
         self._memory_manager = None            # v1 fallback
+        self._checkpointer_context = None
         self._app = None
+        self._background_tasks: set[asyncio.Task] = set()
 
     # ── Init ────────────────────────────────────────────────
 
@@ -53,6 +62,7 @@ class WorkflowService:
             if self._initialized:
                 return
             base_config = AppConfig.from_file(self._config_path)
+            configure_dashscope_endpoint(base_config)
 
             # Try v2 MemoryOrchestrator first (only when memory is enabled)
             if base_config.enable_memory:
@@ -68,7 +78,8 @@ class WorkflowService:
                 logger.info("WorkflowService memory disabled, skipping all memory init")
 
             agents = build_agents(base_config.model, base_config.api_key, base_config)
-            checkpointer, _ = build_checkpointer(base_config)
+            checkpointer, checkpointer_context = build_checkpointer(base_config)
+            self._checkpointer_context = checkpointer_context
 
             # Pass the legacy memory_manager for the graph's memory_reflect node
             legacy_mm = self._memory_orchestrator or self._memory_manager
@@ -76,6 +87,45 @@ class WorkflowService:
             self._base_config = base_config
             self._initialized = True
             logger.info("WorkflowService initialized model=%s", base_config.model)
+
+    async def close(self) -> None:
+        await self._drain_background_tasks()
+        if self._memory_orchestrator and hasattr(self._memory_orchestrator, "close"):
+            try:
+                await self._memory_orchestrator.close()
+            except Exception:
+                logger.warning("v2 memory close failed", exc_info=True)
+        if self._checkpointer_context:
+            try:
+                self._checkpointer_context.__exit__(None, None, None)
+            except Exception:
+                logger.warning("checkpointer close failed", exc_info=True)
+            finally:
+                self._checkpointer_context = None
+        close_search_resources()
+
+    async def _drain_background_tasks(self, timeout: float = 5.0) -> None:
+        tasks = [task for task in self._background_tasks if not task.done()]
+        if not tasks:
+            return
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            for task in tasks:
+                task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                self._background_tasks.discard(task)
+
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, Exception):
+                logger.warning("background task finished with error: %s", result)
 
     async def _try_init_v2_memory(self, config: AppConfig):
         """Try to initialize v2 MemoryOrchestrator. Returns None if unavailable."""
@@ -138,6 +188,7 @@ class WorkflowService:
                 long_term=lt,
                 extractor=extractor,
                 injector=injector,
+                summary_threshold=config.short_term_summary_threshold,
             )
             logger.info(
                 "v2 MemoryOrchestrator ready: pg=%s milvus=%s",
@@ -252,6 +303,26 @@ class WorkflowService:
             except Exception:
                 logger.warning("v1 memory persist failed")
 
+    def _schedule_persist_turn(
+        self, runtime_config: AppConfig, query: str, answer: str,
+    ) -> None:
+        if not runtime_config.enable_memory:
+            return
+
+        task = asyncio.create_task(self._persist_turn(runtime_config, query, answer))
+        self._background_tasks.add(task)
+
+        def _log_background_error(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.warning("background memory persist failed", exc_info=True)
+
+        task.add_done_callback(_log_background_error)
+
     # ── State preparation ───────────────────────────────────
 
     async def _prepare_state(
@@ -275,17 +346,30 @@ class WorkflowService:
         query: str, user_id: str, thread_id: str, tenant_id: str,
         max_iterations: int | None, enable_memory: bool | None,
     ) -> tuple[str, str]:
-        await self._ensure_initialized()
-        runtime_config = self._build_runtime_config(
-            user_id=user_id, thread_id=thread_id, tenant_id=tenant_id,
-            max_iterations=max_iterations, enable_memory=enable_memory,
-        )
-        state, config = await self._prepare_state(query, runtime_config)
-        result = await self._app.ainvoke(state, config)
-        final = str(result.get("final", ""))
-        route = str(result.get("intent", "multiagent"))
-        await self._persist_turn(runtime_config, query, final)
-        return final, route
+        with trace_run(
+            "deepresearch.workflow.run",
+            inputs={"query": query},
+            metadata={
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "tenant_id": tenant_id,
+                "max_iterations": max_iterations,
+                "enable_memory": enable_memory,
+            },
+            tags=("workflow",),
+        ) as span:
+            await self._ensure_initialized()
+            runtime_config = self._build_runtime_config(
+                user_id=user_id, thread_id=thread_id, tenant_id=tenant_id,
+                max_iterations=max_iterations, enable_memory=enable_memory,
+            )
+            state, config = await self._prepare_state(query, runtime_config)
+            result = await self._app.ainvoke(state, config)
+            final = str(result.get("final", ""))
+            route = str(result.get("intent", "multiagent"))
+            await self._persist_turn(runtime_config, query, final)
+            span.end(outputs={"route": route, "final": final, "final_length": len(final)})
+            return final, route
 
     # ── Public API ──────────────────────────────────────────
 
@@ -317,56 +401,107 @@ class WorkflowService:
             query, user_id, thread_id, tenant_id, max_iterations, enable_memory,
         )
 
+    async def run_state(
+        self, query: str, user_id: str, thread_id: str, tenant_id: str,
+        max_iterations: int | None = None, enable_memory: bool | None = None,
+        persist: bool = False,
+    ) -> dict:
+        """Run the graph and return the final state for evaluation/debugging."""
+        with trace_run(
+            "deepresearch.workflow.run_state",
+            inputs={"query": query},
+            metadata={
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "tenant_id": tenant_id,
+                "max_iterations": max_iterations,
+                "enable_memory": enable_memory,
+                "persist": persist,
+            },
+            tags=("workflow", "evaluation"),
+        ) as span:
+            await self._ensure_initialized()
+            runtime_config = self._build_runtime_config(
+                user_id=user_id, thread_id=thread_id, tenant_id=tenant_id,
+                max_iterations=max_iterations, enable_memory=enable_memory,
+            )
+            state, config = await self._prepare_state(query, runtime_config)
+            result = await self._app.ainvoke(state, config)
+            final = str(result.get("final", ""))
+            if persist:
+                await self._persist_turn(runtime_config, query, final)
+            span.end(
+                outputs={
+                    "route": str(result.get("intent", "multiagent")),
+                    "final": final,
+                    "state_keys": sorted(str(key) for key in result.keys()),
+                }
+            )
+            return dict(result)
+
     async def stream_events(
         self, query: str, user_id: str, thread_id: str, tenant_id: str,
         max_iterations: int | None = None, enable_memory: bool | None = None,
     ) -> AsyncIterator[dict]:
-        await self._ensure_initialized()
-        runtime_config = self._build_runtime_config(
-            user_id=user_id, thread_id=thread_id, tenant_id=tenant_id,
-            max_iterations=max_iterations, enable_memory=enable_memory,
-        )
-        state, config = await self._prepare_state(query, runtime_config)
-        final = ""
-        route = "multiagent"
+        with trace_run(
+            "deepresearch.workflow.stream",
+            inputs={"query": query},
+            metadata={
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "tenant_id": tenant_id,
+                "max_iterations": max_iterations,
+                "enable_memory": enable_memory,
+            },
+            tags=("workflow", "stream"),
+        ) as span:
+            await self._ensure_initialized()
+            runtime_config = self._build_runtime_config(
+                user_id=user_id, thread_id=thread_id, tenant_id=tenant_id,
+                max_iterations=max_iterations, enable_memory=enable_memory,
+            )
+            state, config = await self._prepare_state(query, runtime_config)
+            final = ""
+            route = "multiagent"
 
-        yield {"type": "status", "message": "Research task received"}
+            yield {"type": "status", "message": "Research task received"}
 
-        try:
-            async for update in self._app.astream(state, config, stream_mode="updates"):
-                if not isinstance(update, dict):
-                    continue
-                for node_name, node_output in update.items():
-                    yield {
-                        "type": "phase", "node": node_name,
-                        "message": self._node_message(str(node_name)),
-                    }
-                    if isinstance(node_output, dict):
-                        if node_name == "intent":
-                            detected = str(node_output.get("intent", route)).strip().lower()
-                            if detected in {"direct", "multiagent"}:
-                                route = detected
-                        value = node_output.get("final")
-                        if value:
-                            final = str(value)
+            try:
+                async for update in self._app.astream(state, config, stream_mode="updates"):
+                    if not isinstance(update, dict):
+                        continue
+                    for node_name, node_output in update.items():
+                        yield {
+                            "type": "phase", "node": node_name,
+                            "message": self._node_message(str(node_name)),
+                        }
+                        if isinstance(node_output, dict):
+                            if node_name == "intent":
+                                detected = str(node_output.get("intent", route)).strip().lower()
+                                if detected in {"direct", "multiagent"}:
+                                    route = detected
+                            value = node_output.get("final")
+                            if value:
+                                final = str(value)
 
-            if not final:
-                result = await self._app.ainvoke(state, config)
-                final = str(result.get("final", ""))
-                route = str(result.get("intent", route)).strip().lower()
+                if not final:
+                    result = await self._app.ainvoke(state, config)
+                    final = str(result.get("final", ""))
+                    route = str(result.get("intent", route)).strip().lower()
 
-            await self._persist_turn(runtime_config, query, final)
-
-            yield {
-                "type": "route", "route": route,
-                "message": "Direct answer" if route == "direct" else "Deep research",
-            }
-            yield {
-                "type": "final",
-                "query": query, "user_id": user_id,
-                "thread_id": thread_id, "tenant_id": tenant_id,
-                "final": final,
-            }
-        except Exception as exc:
-            logger.exception("stream_events failed")
-            yield {"type": "error", "message": str(exc)}
+                yield {
+                    "type": "route", "route": route,
+                    "message": "Direct answer" if route == "direct" else "Deep research",
+                }
+                self._schedule_persist_turn(runtime_config, query, final)
+                span.end(outputs={"route": route, "final": final, "final_length": len(final)})
+                yield {
+                    "type": "final",
+                    "query": query, "user_id": user_id,
+                    "thread_id": thread_id, "tenant_id": tenant_id,
+                    "final": final,
+                }
+            except Exception as exc:
+                logger.exception("stream_events failed")
+                span.end(error=str(exc))
+                yield {"type": "error", "message": str(exc)}

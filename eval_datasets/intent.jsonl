@@ -1,0 +1,2 @@
+{"id":"intent_direct_weather","query":"weather in Beijing today","category":"intent","expected_route":"direct","score_threshold":60}
+{"id":"intent_multiagent_vs","query":"LangGraph vs AutoGen: compare their agent orchestration models and suitable scenarios.","category":"intent","expected_route":"multiagent","required_keywords":["LangGraph","AutoGen"],"score_threshold":60}

@@ -1,52 +1,56 @@
-"""
-API 鉴权中间件。
+"""API-key authentication middleware."""
 
-通过 X-API-Key header 或 Authorization Bearer token 校验请求。
-校验 key 为 DASHSCOPE_API_KEY 环境变量。
-"""
+import secrets
 
-import os
-from fastapi import Request, HTTPException, status
+from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
-
-_EXCLUDED_PATHS = {"/health", "/api/v1/health", "/docs", "/openapi.json", "/redoc", "/api/v1/research", "/api/v1/research/stream", "/api/v1/research/run"}
+from starlette.responses import JSONResponse
 
 
-def _verify_api_key(api_key: str | None) -> bool:
-    expected = os.getenv("DASHSCOPE_API_KEY", "").strip()
+_DEFAULT_EXCLUDED_PATHS = {"/health", "/api/v1/health"}
+
+
+def _verify_api_key(api_key: str | None, expected: str, auth_required: bool) -> bool:
     if not expected:
-        # 未配置 API Key 时放行（开发/本地模式）
-        return True
-    return bool(api_key) and api_key == expected
+        return not auth_required
+    return bool(api_key) and secrets.compare_digest(api_key, expected)
 
 
 class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
-    """校验 X-API-Key 或 Authorization: Bearer <key>。
+    """Validate API credentials for protected backend routes."""
 
-    排除路径: /health, /docs, /openapi.json, /redoc
-    """
+    def __init__(
+        self,
+        app,
+        *,
+        api_auth_key: str = "",
+        auth_required: bool = False,
+        excluded_paths: set[str] | None = None,
+    ):
+        super().__init__(app)
+        self._api_auth_key = api_auth_key.strip()
+        self._auth_required = auth_required
+        self._excluded_paths = excluded_paths or _DEFAULT_EXCLUDED_PATHS
 
     async def dispatch(self, request: Request, call_next):
-        if any(request.url.path.startswith(p) for p in _EXCLUDED_PATHS):
+        if request.url.path in self._excluded_paths:
             return await call_next(request)
 
         api_key: str | None = None
-
-        # 优先 X-API-Key header
         x_api_key = request.headers.get("X-API-Key")
         if x_api_key:
             api_key = x_api_key.strip()
         else:
-            # 尝试 Authorization: Bearer <key>
             auth = request.headers.get("Authorization", "")
             if auth.startswith("Bearer "):
                 api_key = auth[7:].strip()
 
-        if not _verify_api_key(api_key):
-            raise HTTPException(
+        if not _verify_api_key(api_key, self._api_auth_key, self._auth_required):
+            return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing or invalid API key. Provide X-API-Key or Authorization: Bearer header.",
+                content={
+                    "detail": "Missing or invalid API key. Provide X-API-Key or Authorization: Bearer header."
+                },
             )
 
         return await call_next(request)

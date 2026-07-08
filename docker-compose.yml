@@ -1,5 +1,3 @@
-﻿version: "3.9"
-
 services:
   app:
     build: .
@@ -7,11 +5,50 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      APP_ENV: development
+      API_AUTH_KEY: ${API_AUTH_KEY:-}
+      API_AUTH_REQUIRED: "false"
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      ADMIN_API_REQUIRED: "false"
+      API_DOCS_ENABLED: "true"
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-deepresearch-dev}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TAGS: ${LANGSMITH_TAGS:-local,deepresearch}
+      LANGSMITH_ENVIRONMENT: ${LANGSMITH_ENVIRONMENT:-development}
+      LANGSMITH_SAMPLE_RATE: ${LANGSMITH_SAMPLE_RATE:-1.0}
+      LANGSMITH_HIDE_INPUTS: ${LANGSMITH_HIDE_INPUTS:-false}
+      LANGSMITH_HIDE_OUTPUTS: ${LANGSMITH_HIDE_OUTPUTS:-false}
+      RATE_LIMIT_BACKEND: memory
+      RAG_UPLOAD_DIR: /data/rag_uploads
+      EVAL_DATASETS_DIR: /app/eval_datasets
+      EVAL_RESULTS_DIR: /data/eval_results
+      REDIS_URL: redis://redis:6379
+      POSTGRES_DSN: postgresql://root:password@postgres:5432/mydb
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      SEARCH_BACKENDS: ${SEARCH_BACKENDS:-bocha}
+      SEARCH_FALLBACK_BACKENDS: ${SEARCH_FALLBACK_BACKENDS:-tavily}
+      SEARCH_COUNT: ${SEARCH_COUNT:-3}
+      SEARCH_TIMEOUT: ${SEARCH_TIMEOUT:-8}
+      SEARCH_FETCH_TIMEOUT: ${SEARCH_FETCH_TIMEOUT:-4}
+      SEARCH_MAX_WORKERS: ${SEARCH_MAX_WORKERS:-4}
+      SEARCH_MAX_FETCH_PAGES: ${SEARCH_MAX_FETCH_PAGES:-3}
+      SEARCH_CACHE_ENABLED: ${SEARCH_CACHE_ENABLED:-true}
+      SEARCH_CACHE_TTL_SECONDS: ${SEARCH_CACHE_TTL_SECONDS:-3600}
+      SEARCH_CACHE_MAX_ENTRIES: ${SEARCH_CACHE_MAX_ENTRIES:-1024}
+      SEARCH_REWRITE_ENABLED: ${SEARCH_REWRITE_ENABLED:-false}
+      SEARCH_FETCH_ENABLED: ${SEARCH_FETCH_ENABLED:-true}
     depends_on:
       redis:
         condition: service_started
       postgres:
         condition: service_started
+    volumes:
+      - rag_uploads:/data/rag_uploads
+      - eval_results:/data/eval_results
     restart: unless-stopped
 
   redis:
@@ -35,20 +72,22 @@ services:
     restart: unless-stopped
 
   milvus:
-    image: milvusdb/milvus:v2.4.0
+    image: milvusdb/milvus:v2.5.7
     ports:
       - "19530:19530"
       - "9091:9091"
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
     depends_on:
       - etcd
       - minio
     restart: unless-stopped
 
   etcd:
-    image: quay.io/coreos/etcd:v3.5.5
+    image: quay.io/coreos/etcd:v3.5.18
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -65,5 +104,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  rag_uploads:
+  eval_results:
   redis_data:
   pg_data:

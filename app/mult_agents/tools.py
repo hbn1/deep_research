@@ -21,6 +21,7 @@ from .search import (
 )
 
 _search_initialized = False
+_search_signature: tuple | None = None
 logger = logging.getLogger("mult_agents")
 
 # -- RAG init --
@@ -38,9 +39,9 @@ def init_rag_system(api_key: str, config=None, tenant_id="default_tenant"):
         print(f"RAG init failed: {e}")
 
 
-def _get_rag():
+def _get_rag(tenant_id: str | None = None):
     """Get current RAG instance from RAGManager."""
-    return RAGManager.get_or_none(tenant_id=_rag_tenant_id)
+    return RAGManager.get_or_none(tenant_id=tenant_id or _rag_tenant_id)
 
 
 # -- Search init --
@@ -49,44 +50,74 @@ def init_search_from_config(
     api_key: str = "",
     serper_api_key: str = "",
     tavily_api_key: str = "",
+    bocha_api_key: str = "",
     search_backends: str = "tavily",
-    search_fallback_backends: str = "serper,tavily",
-    search_count: int = 4,
-    search_timeout: float = 15.0,
-    search_fetch_timeout: float = 8.0,
-    search_max_workers: int = 6,
+    search_fallback_backends: str = "tavily",
+    search_count: int = 3,
+    search_timeout: float = 8.0,
+    search_fetch_timeout: float = 4.0,
+    search_max_workers: int = 4,
+    search_max_fetch_pages: int = 3,
     search_cache_enabled: bool = True,
     search_cache_ttl_seconds: int = 3600,
+    search_cache_max_entries: int = 1024,
     search_rewrite_enabled: bool = True,
     search_fetch_enabled: bool = True,
 ):
     """Initialize global enterprise search engine from AppConfig."""
-    global _search_initialized
-    if _search_initialized:
+    global _search_initialized, _search_signature
+    tenant_id = os.getenv("TENANT_ID", "default_tenant").strip()
+    resolved_bocha_key = bocha_api_key or os.getenv("BOCHA_API_KEY", "").strip()
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    signature = (
+        serper_api_key,
+        tavily_api_key,
+        resolved_bocha_key,
+        search_backends,
+        search_fallback_backends,
+        search_count,
+        search_timeout,
+        search_fetch_timeout,
+        search_max_workers,
+        search_max_fetch_pages,
+        search_cache_enabled,
+        search_cache_ttl_seconds,
+        search_cache_max_entries,
+        search_rewrite_enabled,
+        search_fetch_enabled,
+        redis_url,
+        tenant_id,
+    )
+    if _search_initialized and _search_signature == signature:
         return
     config = SearchConfig(
         serper_api_key=serper_api_key,
         tavily_api_key=tavily_api_key,
+        bocha_api_key=resolved_bocha_key,
         enabled_backends=[b.strip() for b in search_backends.split(",") if b.strip()],
         fallback_backends=[b.strip() for b in search_fallback_backends.split(",") if b.strip()],
         default_count=search_count,
         request_timeout=search_timeout,
         fetch_timeout=search_fetch_timeout,
         max_workers=search_max_workers,
+        max_fetch_pages=search_max_fetch_pages,
         cache_enabled=search_cache_enabled,
         cache_ttl_seconds=search_cache_ttl_seconds,
+        cache_max_entries=search_cache_max_entries,
+        fetch_enabled=search_fetch_enabled,
         rewrite_enabled=search_rewrite_enabled,
         rewrite_model="qwen-turbo",
     )
-    init_search(config, redis_url=os.getenv("REDIS_URL", "").strip(), tenant_id=os.getenv("TENANT_ID", "default_tenant").strip())
+    init_search(config, redis_url=redis_url, tenant_id=tenant_id)
     _search_initialized = True
+    _search_signature = signature
 
 
 # -- Core search --
 
-def search_knowledge_base_records(query: str, limit: int = 5) -> list[dict]:
+def search_knowledge_base_records(query: str, limit: int = 5, tenant_id: str | None = None) -> list[dict]:
     """Search local knowledge base with full RAG pipeline (hybrid+rerank)."""
-    rag = _get_rag()
+    rag = _get_rag(tenant_id=tenant_id)
     if rag is None:
         return []
     try:
