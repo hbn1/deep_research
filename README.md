@@ -1,15 +1,17 @@
 # DeepResearch Multi-Agent Assistant
 
-DeepResearch 是一个面向企业级研究问答场景的多智能体助手。项目由 FastAPI 后端、LangGraph 工作流、Vue 3 前端、本地 RAG、记忆系统、评测系统和生产级 Docker 部署配置组成。
+DeepResearch 是一个面向企业级研究问答和复杂问题调研的多智能体助手。项目使用 LangGraph 编排多个智能体节点，结合 Web 搜索、本地 RAG、会话记忆、证据审查、评测系统和可观测能力，为用户生成带来源依据的结构化研究报告。
 
-它适合用来构建内部知识研究助手、资料调研助手、带引用的深度问答系统，以及需要可观测、可评测、可部署的 agent 应用原型。
+项目同时提供 CLI、FastAPI 后端、Vue 3 前端和 Docker Compose 部署方式，既可用于课程/演示，也可继续扩展为企业知识研究工作台。
 
 ## 核心能力
 
-- 多智能体研究流程：意图识别、规划、Web 搜索、本地 RAG、证据判断、分析、反思和写作。
-- 直接回答快路径：简单算术和低风险直答问题可跳过完整多智能体流程，降低延迟和成本。
-- 本地 RAG：支持上传 PDF 和 DOCX，写入 Milvus 向量库，并按租户检索。
-- 记忆系统：支持 Redis 短期记忆、Postgres 长期记忆、Milvus 向量记忆，并可回退到本地模式。
+- 智能意图分流：简单问答走快速回答链路，复杂调研走多智能体研究链路。
+- 多智能体协作：规划、网页检索、本地知识库检索、证据判断、分析反思和报告写作分工执行。
+- 双源检索增强：支持联网搜索与本地知识库 RAG 并行召回。
+- 证据驱动输出：保留检索来源、证据池、引用编号和参考资料列表。
+- 记忆增强：支持 Redis 短期记忆、Postgres 长期记忆、Milvus 向量记忆和跨轮次上下文注入。
+- 流式交互：后端通过 Server-Sent Events 输出执行阶段，前端实时显示任务进度。
 - 企业级搜索：支持 Bocha、Tavily、Serper，多后端 fallback、TTL/LRU 缓存、并发抓取和重排序。
 - 安全与治理：API key 鉴权、独立 admin key、滑动窗口限流、请求 ID、生产环境配置校验。
 - 可观测性：可选 LangSmith trace，覆盖 HTTP、workflow、RAG 和 evaluation 链路。
@@ -18,33 +20,55 @@ DeepResearch 是一个面向企业级研究问答场景的多智能体助手。�
 
 ## 技术栈
 
-- 后端：FastAPI、LangGraph、LangChain、Pydantic Settings、SSE
-- Agent/模型：DashScope / Qwen 兼容配置，支持节点级小模型覆盖
-- 数据与检索：Redis、Postgres、Milvus、pgvector、RAG 文档导入
-- 前端：Vue 3、Vite、TypeScript
-- 可观测与评测：LangSmith、自定义 evaluation runner
-- 部署：Docker、Docker Compose、Nginx
+| 模块 | 技术 |
+| --- | --- |
+| 后端 API | FastAPI, Uvicorn, SSE |
+| 多智能体编排 | LangGraph, LangChain |
+| 大模型 | DashScope / Qwen / ChatTongyi |
+| 搜索 | Bocha, Serper, Tavily |
+| 本地 RAG | Milvus, BM25, DashScope Embedding / Rerank |
+| 记忆系统 | Redis, PostgreSQL, SQLite fallback, Milvus optional |
+| 前端 | Vue 3, TypeScript, Vite |
+| 可观测与评测 | LangSmith, custom evaluation runner |
+| 部署 | Docker, Docker Compose, Nginx |
 
-## 目录结构
+## 项目结构
 
 ```text
-app/
-  app_main.py                  # FastAPI 入口
-  backend/                     # API 路由、中间件、配置、服务层
-  mult_agents/                 # LangGraph 多智能体工作流
-  evaluation/                  # 评测数据集加载、评分、结果存储
-  observability/               # LangSmith trace 封装
-front/agent_front/             # Vue 3 前端
-eval_datasets/                 # smoke / intent 示例评测集
-scripts/                       # 本地验证和 LangSmith 配置脚本
-docker-compose.yml             # 本地依赖栈
-docker-compose.prod.yml        # 生产部署栈
-DEPLOYMENT.md                  # 生产部署说明
+deep_research/
+  app/
+    app_main.py                     # FastAPI 应用入口
+    backend/
+      config/                       # API 服务配置
+      dependencies/                 # 管理接口依赖
+      middleware/                   # 鉴权、限流、请求 ID、trace
+      router/                       # 健康检查、研究、RAG、评测、观测接口
+      schemas/                      # 请求/响应模型
+      service/                      # Workflow 和 RAG 服务层
+    evaluation/                     # 评测数据集加载、评分、结果存储
+    mult_agents/
+      graph.py                      # LangGraph 工作流编排
+      main.py                       # CLI 入口与 agent 构建
+      config.py                     # config.json 与环境变量加载
+      state.py                      # 研究状态定义
+      nodes/                        # 各智能体节点实现
+      search.py                     # 多搜索后端、缓存、重排
+      rag/                          # 本地知识库检索与入库
+      memory/                       # 短期/长期记忆系统
+    observability/                  # LangSmith trace 封装
+  front/agent_front/                # Vue 3 前端
+  eval_datasets/                    # smoke / intent 示例评测集
+  scripts/                          # 本地验证和 LangSmith 配置脚本
+  docker-compose.yml                # 本地依赖栈
+  docker-compose.prod.yml           # 生产部署栈
+  DEPLOYMENT.md                     # 生产部署说明
 ```
 
 ## 本地快速开始
 
 ### 1. 安装依赖
+
+建议使用 Python 3.10+ 和 Node.js 20.19+ 或 22.12+。
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -77,6 +101,16 @@ TAVILY_API_KEY=your-tavily-key
 SERPER_API_KEY=your-serper-key
 ```
 
+常用配置项：
+
+- `MODEL`：复杂研究节点使用的大模型。
+- `SMALL_MODEL`：意图识别、快速回答等轻量节点使用的小模型。
+- `MAX_ITERATIONS`：反思补搜的最大轮数。
+- `ENABLE_MEMORY`：是否启用记忆系统。
+- `REDIS_URL`、`POSTGRES_DSN`、`MILVUS_HOST`：记忆与 RAG 基础设施配置。
+- `SEARCH_BACKENDS`：默认搜索后端。
+- `SEARCH_FALLBACK_BACKENDS`：默认搜索失败时的候选后端。
+
 ### 3. 启动本地基础设施
 
 需要 Redis、Postgres、Milvus 时：
@@ -100,6 +134,12 @@ cd app
 python -m uvicorn app_main:app --host 127.0.0.1 --port 8001
 ```
 
+也可以在仓库根目录启动：
+
+```powershell
+python -m uvicorn app_main:app --app-dir app --host 127.0.0.1 --port 8001
+```
+
 健康检查：
 
 ```powershell
@@ -119,6 +159,27 @@ npm run dev -- --host 127.0.0.1 --port 5173
 - 前端：`http://localhost:5173`
 - 后端健康检查：`http://127.0.0.1:8001/health`
 - 开发环境 API 文档：`http://127.0.0.1:8001/docs`
+
+## CLI 使用
+
+单次提问：
+
+```powershell
+python main.py --once "请调研多智能体 DeepResearch 系统的关键技术路线"
+```
+
+交互式对话：
+
+```powershell
+python main.py
+```
+
+CLI 内置指令：
+
+- `quit`、`exit`、`退出`：结束会话。
+- `/memory` 或 `memory-status`：查看记忆统计。
+- `/memory-vacuum`：清理低保留价值记忆。
+- `/memory-trace`：查看最近一次记忆轨迹。
 
 ## 常用 API
 
@@ -142,6 +203,26 @@ POST /api/v1/research/stream
 }
 ```
 
+同步响应示例：
+
+```json
+{
+  "query": "...",
+  "user_id": "default_user",
+  "thread_id": "default",
+  "tenant_id": "default_tenant",
+  "final": "Markdown 格式研究报告"
+}
+```
+
+流式接口以 SSE 返回阶段性事件：
+
+- `status`：任务状态。
+- `phase`：当前执行节点。
+- `route`：意图分流结果。
+- `final`：最终报告。
+- `error`：错误信息。
+
 管理接口默认需要 `X-Admin-Key`：
 
 ```http
@@ -153,6 +234,33 @@ GET  /api/v1/evals/datasets
 POST /api/v1/evals/run
 GET  /api/v1/observability/langsmith/status
 ```
+
+## 工作流说明
+
+复杂问题的执行链路如下：
+
+```text
+intent
+  ├─ direct_answer -> END
+  └─ plan
+       ├─ web_search
+       ├─ local_rag
+       └─ deep_dive -> analyze
+              ├─ reflect -> web_search/local_rag
+              └─ prune_context -> write -> memory_reflect -> END
+```
+
+核心流程：
+
+1. `intent` 判断问题是简单问答还是复杂调研。
+2. `plan` 拆解目标、子问题、检索计划和报告大纲。
+3. `web_search` 调用搜索后端并进行去重、过滤、全文抓取和重排。
+4. `local_rag` 从本地知识库召回相关材料。
+5. `deep_dive` 对证据进行可靠性判断和冲突识别。
+6. `analyze` 生成核心发现、信息缺口和是否需要补搜的判断。
+7. `reflect` 在信息不足时生成补充检索计划。
+8. `write` 基于合法来源 ID 输出 Markdown 报告。
+9. `memory_reflect` 抽取本轮可复用记忆，用于后续对话。
 
 ## 认证与安全
 
@@ -204,6 +312,12 @@ curl -X POST "http://127.0.0.1:8001/api/v1/rag/documents" `
   -F "tenant_id=default_tenant" `
   -F "user_id=default_user" `
   -F "file=@sample.pdf"
+```
+
+也可以使用离线入库脚本：
+
+```powershell
+python app\mult_agents\rag\ingest.py
 ```
 
 ## 评测系统
@@ -338,9 +452,11 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 - 评测接口 403：确认请求带有 `X-Admin-Key`，并且后端配置了正确的 `ADMIN_API_KEY`。
 - 前端无法访问后端：本地检查 `VITE_API_TARGET`，生产检查 Nginx 代理配置和后端健康检查。
 
-## 安全提醒
+## 注意事项与安全提醒
 
-- 不要提交 `.env`、`.env.production`、本地数据库、上传文件或评测结果。
+- 不要提交真实 `.env`、`.env.production`、API Key、数据库密码、本地数据库、上传文件或评测结果。
 - 不要把模型供应商 key 当作应用 API key 使用。
 - 任何出现在终端、截图、聊天记录或 Git 历史里的密钥都应轮换。
+- 搜索与模型服务依赖网络和外部服务额度，演示前建议提前验证 key 是否可用。
+- 如果未启用 Redis/PostgreSQL/Milvus，系统会尽量降级到内存或 SQLite fallback，但 RAG 与长期记忆能力会受限。
 - 生产环境不要公开 Redis、Postgres、Milvus、etcd、MinIO 或 FastAPI 容器端口。
